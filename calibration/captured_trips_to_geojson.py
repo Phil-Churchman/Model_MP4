@@ -5,7 +5,7 @@ Reads <folder_name>/captured_locations/source_trip_data.csv -- one row per
 observed trip, with a start/end timestamp and a start/end lat-lon -- snaps each
 endpoint to the road network and routes between them with the same weights the
 simulation uses, then writes one file per user_id in the format the simulation
-produces (<folder_name>/output/output_trips_time_queued/agent_XXXX_time.geojson).
+produces (<output_folder>/output_trips_time_queued/agent_XXXX_time.geojson).
 
 The folder name comes from scenario.json and the per-highway-type speeds from
 road_speeds.json, exactly as they do for the simulation. Unlike
@@ -35,6 +35,7 @@ from scipy.spatial import cKDTree
 from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from output_archive import OutputArchive
 from scenario_config import (load_scenario, add_scenario_argument,
                              load_road_speeds, road_speeds_ms)
 
@@ -483,6 +484,19 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    # This writes agent_XXXX_time.geojson into the folder the simulation writes
+    # the same filenames into, and only creates files -- so a capture covering
+    # fewer agents than the last run would leave that run's surplus files behind,
+    # mixed in and indistinguishable. Archiving first is what makes the folder
+    # hold one dataset rather than two, and it puts the previous contents in
+    # output/runs/<timestamp>/ rather than deleting them.
+    #
+    # Only when writing to the scenario's own output folder: --out-dir names
+    # somewhere the caller chose, and clearing that is not this script's call.
+    if os.path.abspath(args.out_dir) == os.path.abspath(DEFAULT_OUTPUT_DIR):
+        OutputArchive.for_scenario(SCENARIO).archive_output_dir()
+
     os.makedirs(args.out_dir, exist_ok=True)
 
     print(f"Scenario folder: {FOLDER_NAME}")

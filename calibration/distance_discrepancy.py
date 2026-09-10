@@ -7,7 +7,7 @@ against the distance the routing algorithm produced for the same origin and
 destination. Writes a histogram figure and the histogram data as CSV into the
 scenario's output folder.
 
-    python utilities/distance_discrepancy.py --scenario scenario_nairobi.json
+    python calibration/distance_discrepancy.py --scenario scenarios_private/scenario_nairobi.json
 
 What the number means
 ---------------------

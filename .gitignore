@@ -189,3 +189,20 @@ cython_debug/
 # and the per-agent tracks alone run to thousands of files per
 # scenario. Matches <scenario folder>/output/ at any depth.
 output/
+
+# Results, now that "output_folder" has moved them out of the scenario
+# folder. Same reasoning as the rule above: every run rebuilds them,
+# and one scenario's per-agent tracks alone are thousands of files.
+scenarios_output/*
+
+# Private scenarios. Kept out of the repo by name rather than by
+# content, so nothing in one has to be remembered about individually.
+# scenarios_shared/ is deliberately NOT here: the scenario files in it
+# are the ones meant to be committed.
+scenarios_private/*
+
+# osmnx's HTTP download cache -- the raw Overpass API responses behind
+# roads.graphml. Re-fetched on demand, machine-specific, and by far the
+# largest thing here that is not a result. Unanchored, so it catches
+# "Road extraction/cache/" as well as the one at the root.
+cache/

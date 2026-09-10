@@ -5,7 +5,6 @@ import math
 import argparse
 import random
 import stat
-import shutil
 import time
 import multiprocessing
 import heapq
@@ -25,10 +24,12 @@ from scipy.sparse.csgraph import dijkstra as csgraph_dijkstra
 from shapely.geometry import Point
 from pyproj import Transformer
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from output_archive import OutputArchive
 from scenario_config import (load_scenario, add_scenario_argument,
                              load_road_speeds, road_speeds_ms,
                              load_trip_distributions, simulation_mode,
-                             HAIL_RANK, DEMAND_MODEL_MODE, DISTRIBUTION)
+                             HAIL_RANK, DEMAND_MODEL_MODE, DISTRIBUTION,
+                             CALIBRATION, RUNNABLE_MODES)
 
 from trip_demand_generator import generate_trips
 from calibration.fill_gaps import insert_idle_points
@@ -52,6 +53,17 @@ PARENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # a derived flag because it reads better than the string comparison at the dozen
 # places that only care whether demand is being generated.
 SIM_MODE = simulation_mode(SCENARIO)
+if SIM_MODE not in RUNNABLE_MODES:
+    # Refused rather than fallen through. The old else-branch would have run the
+    # demand model, so a scenario labelled "calibration" would have quietly
+    # produced a demand-model run and written it into the same output folder.
+    raise SystemExit(
+        f"simulation_mode is {SIM_MODE!r}, which is not a runnable mode: it "
+        f"marks a scenario used to fit parameters against captured GPS data.\n"
+        f"  {os.path.basename(SCENARIO.path)}\n"
+        f"Set it to one of {', '.join(RUNNABLE_MODES)} to run the fleet "
+        f"simulation, or use calibration/captured_trips_to_geojson.py to build "
+        f"tracks from the capture instead.")
 DEMAND_MODEL = SIM_MODE == DEMAND_MODEL_MODE
 DISTRIBUTION_MODE = SIM_MODE == DISTRIBUTION
 FOLDER_NAME = SCENARIO.folder_name
@@ -79,6 +91,20 @@ ARCHIVE_KEEP = int(scenario_cfg.get("archive_keep", 3))
 ARCHIVE_MAX_MB = float(scenario_cfg.get("archive_max_mb", 100))
 HISTOGRAM_PLOT = os.path.join(OUTPUT_DIR, "station_queues_analysis.png")
 SWAP_EXCEL_OUTPUT = os.path.join(OUTPUT_DIR, "swap_station_timesteps.xlsx")
+
+# An .xlsx sheet cannot hold more rows than this, header included. It is a limit
+# of the file format rather than of the writer, so there is no option that lifts
+# it -- the only ways under it are a longer simulation_step_sec or a shorter
+# period. The station detail is one row per station per timestep, so it is the
+# step and the station count together that decide, not the run length alone.
+EXCEL_MAX_ROWS = 1_048_576
+
+# Whether the per-timestep station detail is collected at all. Decided in main()
+# once the step, the period and the station count are known: a run that could
+# never be written is not worth recording, and recording it is not free -- every
+# timestep holds the id of every agent at every station, which for a long run at
+# a short step is the largest thing the simulation keeps in memory.
+RECORD_TIMESTEPS = True
 
 # --- SIMULATION PARAMETERS ---
 SIMULATION_INTERVAL_SEC = scenario_cfg.get("simulation_step_sec", 60) 
@@ -109,6 +135,25 @@ PASSENGER_MAX_DIST = scenario_cfg.get("passenger_max_dist", 6000)
 PASSENGER_MIN_DIST = float(scenario_cfg.get("passenger_min_dist", 0))
 DEVIATION_FACTOR = scenario_cfg.get("deviation_factor", 1)
 PROBABILITY_OF_HAILING_TAXI = scenario_cfg.get("probability_hail", 0.75)
+
+# --- DEMAND MODEL ---
+# Whether an idle vehicle drives home when there is nothing coming, rather than
+# waiting wherever it dropped its last fare. Off by default, so a scenario that
+# does not ask for it behaves exactly as before.
+RETURN_TO_BASE = bool(scenario_cfg.get("return_to_base", False))
+# How far ahead "nothing coming" looks. An hour, because the demand generator
+# places trips in one-hour windows: a shorter horizon would send vehicles home
+# in the gap between two trips of the same busy hour, and a longer one would
+# keep them out through a lull they could have sat out at base.
+RETURN_TO_BASE_HORIZON_SEC = 3600
+# The second trigger: how long a vehicle may sit idle away from base before it
+# drives home regardless. The horizon above only fires when the WHOLE fleet has
+# nothing coming, so a vehicle left in a quiet corner while demand carries on
+# elsewhere never met it -- it stayed where its last fare ended, for as long as
+# nothing was allocated to it. Its own hour, rather than reusing the horizon:
+# one is a look-ahead over demand, the other is elapsed time for one vehicle,
+# and they are only the same number by coincidence.
+RETURN_TO_BASE_IDLE_SEC = 3600
 
 # --- DISTRIBUTION MODE ---
 # The wait between dropping a fare and starting the next pickup is drawn; the
@@ -211,6 +256,11 @@ class SwapStation:
         
         self.queue_history.append(len(self.active_taxis))
 
+        # queue_history is one integer per station per timestep and feeds the
+        # figure and queue_history.json, so it is always kept. What follows is
+        # the per-agent detail, and only it is suspended.
+        if not RECORD_TIMESTEPS:
+            return
 
         swapping_agent_ids = []
         queueing_agent_ids = []
@@ -237,7 +287,8 @@ class SwapStation:
 # decision needs, and only what it produced.
 AgentRequest = namedtuple("AgentRequest",
                           "id pos running_total trip_count assigned_trip "
-                          "allocated_trip current_sec")
+                          "allocated_trip current_sec base_node quiet_ahead "
+                          "idle_for")
 AgentUpdate = namedtuple("AgentUpdate",
                          "trip_type feature pos running_total trip_count "
                          "busy_until pending_wait_sec state arrival_distance "
@@ -248,6 +299,13 @@ class TaxiAgent:
     def __init__(self, agent_id, start_node, spawn_time):
         self.id = agent_id
         self.pos = start_node
+        # Where the vehicle goes home to. The node it was placed at, which in
+        # demand-model mode is a swap station -- see the spawn in main().
+        self.base_node = start_node
+        # When this vehicle last became idle, or None while it is working. Only
+        # read to decide whether it has been parked away from base long enough
+        # to go home; see RETURN_TO_BASE_IDLE_SEC.
+        self.idle_since = None
         self.spawn_time = spawn_time
         # Vehicles start part-way through a charge rather than all full at once,
         # so swap demand is spread from the first timestep instead of arriving as
@@ -731,6 +789,19 @@ def calculate_next_activity(req):
             else:
                 trip_type = "passenger"
                 assigned_trip = False
+        elif (RETURN_TO_BASE
+              and req.base_node is not None and req.pos != req.base_node
+              and (req.quiet_ahead
+                   or req.idle_for > RETURN_TO_BASE_IDLE_SEC)):
+            # Go home rather than idling wherever the last fare happened to end,
+            # on either of two counts: nothing is due anywhere for the next hour,
+            # or this vehicle in particular has been sitting here for one. The
+            # second catches what the first cannot -- a vehicle stranded away
+            # from the demand while the fleet as a whole stays busy, which the
+            # fleet-wide look-ahead reads as "there is work" and leaves parked.
+            # Once at base the position test stops either from repeating, and
+            # the vehicle simply stays idle.
+            trip_type = "to_base"
         else:
             return None
 
@@ -739,6 +810,10 @@ def calculate_next_activity(req):
     # the passenger trip by the next fare wait.
     if trip_type == "to_swap":
         wait_sec_raw = SWAP_WAIT_SEC
+    elif trip_type == "to_base":
+        # No dwell: the vehicle parks and is idle again on the next timestep,
+        # free to be allocated the moment demand appears.
+        wait_sec_raw = 0
     elif DISTRIBUTION_MODE:
         wait_sec_raw = PICKUP_WAIT_SEC if trip_type == "pickup" else sample_fare_wait_sec()
     elif trip_type == "hail":
@@ -754,6 +829,8 @@ def calculate_next_activity(req):
         target_node = allocated_trip["dest_node"]
     elif trip_type == "pickup" and DEMAND_MODEL:
         target_node = allocated_trip["source_node"]
+    elif trip_type == "to_base":
+        target_node = req.base_node
     else:
         target_node = get_target_node(req.pos, trip_type, budget_m)
         if target_node is None:
@@ -798,6 +875,12 @@ def calculate_next_activity(req):
 
     if trip_type == "to_swap":
         running_total, trip_count = 0, 0
+    elif trip_type == "to_base":
+        # The drive home spends range like any other, but it is not a step in
+        # the pickup/passenger cycle: trip_count parity is what pairs those two
+        # (and what is_swap tests), so advancing it here would invert the order
+        # of every trip that followed.
+        running_total, trip_count = req.running_total + total_len, req.trip_count
     else:
         running_total, trip_count = req.running_total + total_len, req.trip_count + 1
 
@@ -822,9 +905,11 @@ def calculate_next_activity(req):
         assigned_trip=assigned_trip, met_record=met_record)
 
 
-def request_for(agent, current_sec):
+def request_for(agent, current_sec, quiet_ahead=False):
+    idle_for = 0 if agent.idle_since is None else current_sec - agent.idle_since
     return AgentRequest(agent.id, agent.pos, agent.running_total, agent.trip_count,
-                        agent.assigned_trip, agent.allocated_trip, current_sec)
+                        agent.assigned_trip, agent.allocated_trip, current_sec,
+                        agent.base_node, quiet_ahead, idle_for)
 
 
 def apply_update(agent, up):
@@ -832,6 +917,9 @@ def apply_update(agent, up):
     if up is None:
         return
     agent.current_trip_type = up.trip_type
+    # It has been given something to do, so the idle clock stops. It restarts
+    # from zero the next time the main loop puts it back into IDLE.
+    agent.idle_since = None
     agent.time_features.append(up.feature)
     agent.state = up.state
     agent.busy_until = up.busy_until
@@ -849,199 +937,11 @@ def apply_update(agent, up):
 # MAIN
 # ============================================================
 
-def _guard_output_dir():
-    if os.path.basename(OUTPUT_DIR) != "output" or not str(FOLDER_NAME).strip():
-        raise ValueError(f"Refusing to touch unexpected output path: {OUTPUT_DIR}")
-
-
-def _dir_size_mb(path, skip=()):
-    total = 0
-    for root, dirs, files in os.walk(path):
-        dirs[:] = [d for d in dirs if os.path.join(root, d) not in skip]
-        for name in files:
-            try:
-                total += os.path.getsize(os.path.join(root, name))
-            except OSError:
-                pass
-    return total / 1e6
-
-
-def _remove_file(path):
-    """Delete one file, giving a transient Windows lock a chance to clear."""
-    for attempt in range(4):
-        try:
-            os.remove(path)
-            return True
-        except FileNotFoundError:
-            return True
-        except OSError:
-            if attempt == 3:
-                return False
-            try:
-                os.chmod(path, stat.S_IWRITE)
-            except OSError:
-                pass
-            time.sleep(0.25)
-
-
-def _delete_output_contents(skip):
-    """
-    Delete the files under OUTPUT_DIR so a smaller run cannot leave stale
-    results behind from a larger one.
-
-    Files only -- never the directories themselves. shutil.rmtree also has to
-    rmdir, and on Windows a directory handle held by OneDrive, Explorer or an
-    indexer makes that fail with PermissionError even once the directory is
-    empty. That aborts the run *after* the files are already gone, which is the
-    worst of both outcomes. Leaving the empty directories in place avoids the
-    failure mode entirely; they get reused as they are.
-    """
-    stubborn = []
-    for root, dirs, files in os.walk(OUTPUT_DIR):
-        dirs[:] = [d for d in dirs if os.path.join(root, d) not in skip]
-        for name in files:
-            path = os.path.join(root, name)
-            if not _remove_file(path):
-                stubborn.append(path)
-
-    if stubborn:
-        shown = "\n  ".join(stubborn[:10])
-        more = f"\n  ... and {len(stubborn) - 10} more" if len(stubborn) > 10 else ""
-        raise RuntimeError(
-            "Could not clear the previous run from the output folder. Close "
-            "whatever is holding these open (Excel and OneDrive are the usual "
-            f"culprits) and re-run:\n  {shown}{more}")
-
-
-def _remove_dir(path):
-    """
-    rmdir with a retry. On Windows an *empty* directory still refuses to go with
-    PermissionError while OneDrive or the indexer holds a handle on it, and that
-    handle is usually released a moment later.
-    """
-    for attempt in range(4):
-        try:
-            os.rmdir(path)
-            return True
-        except FileNotFoundError:
-            return True
-        except OSError:
-            if attempt == 3:
-                return False
-            time.sleep(0.25)
-
-
-def _run_is_empty(path):
-    return not any(f for _r, _d, fs in os.walk(path) for f in fs)
-
-
-def _prune_runs(runs_dir, keep):
-    """
-    Drop the oldest archived runs beyond `keep`.
-
-    Retention counts runs that still hold files. A directory skeleton left
-    behind by a failed rmdir has already given its space back, so it must not
-    occupy a retention slot -- otherwise a few stuck directories would silently
-    push out real archived runs. Skeletons are retried on every prune.
-    """
-    if not os.path.isdir(runs_dir):
-        return
-
-    all_runs = sorted(d for d in os.listdir(runs_dir)
-                      if os.path.isdir(os.path.join(runs_dir, d)))
-    skeletons = [d for d in all_runs if _run_is_empty(os.path.join(runs_dir, d))]
-    real = [d for d in all_runs if d not in skeletons]
-
-    for name in skeletons:
-        _remove_dir_tree(os.path.join(runs_dir, name))
-
-    for name in real[:max(0, len(real) - keep)]:
-        victim = os.path.join(runs_dir, name)
-        gone = _remove_dir_tree(victim)
-        print(f"  pruned old run {name}"
-              + ("" if gone else " (files removed; empty folders left behind, "
-                                "something has a handle on them)"))
-
-
-def _remove_dir_tree(path):
-    """Delete a tree bottom-up. Returns True only if it fully went."""
-    ok = True
-    for root, _dirs, files in os.walk(path, topdown=False):
-        for f in files:
-            ok &= _remove_file(os.path.join(root, f))
-        ok &= _remove_dir(root)
-    return ok
-
-
-def archive_output_dir():
-    """
-    Move the previous run into output/runs/<timestamp>/ instead of deleting it.
-
-    Archiving rather than relocating where the *new* run is written is what
-    keeps this safe: OUTPUT_DIR still holds the latest results, so every
-    analysis script and both animation pages carry on reading exactly the path
-    they always did. Nothing downstream has to know runs exist.
-
-    Whole directories are moved with a single rename where possible, so
-    archiving 700 agent files costs one operation rather than 700.
-
-    Archiving is skipped for large outputs unless asked for explicitly: these
-    folders live in OneDrive, and keeping several copies of a 400 MB run means
-    gigabytes of sync traffic. The decision is always printed.
-    """
-    _guard_output_dir()
-    if not os.path.isdir(OUTPUT_DIR):
-        return
-
-    runs_dir = os.path.join(OUTPUT_DIR, RUNS_DIR_NAME)
-    skip = {runs_dir}
-    size_mb = _dir_size_mb(OUTPUT_DIR, skip=skip)
-
-    if not any(os.scandir(OUTPUT_DIR)):
-        return
-
-    wanted = ARCHIVE_RUNS
-    if wanted is None:                      # not set: decide on size, and say so
-        wanted = size_mb <= ARCHIVE_MAX_MB
-        if not wanted:
-            print(f"Previous run is {size_mb:,.0f} MB (over archive_max_mb="
-                  f"{ARCHIVE_MAX_MB:,.0f}); deleting it rather than archiving. "
-                  f'Set "archive_runs": true in the scenario to keep it anyway.')
-
-    if not wanted:
-        _delete_output_contents(skip)
-        return
-
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    target = os.path.join(runs_dir, stamp)
-    os.makedirs(target, exist_ok=True)
-
-    moved = 0
-    for entry in list(os.scandir(OUTPUT_DIR)):
-        if entry.path in skip:
-            continue
-        try:
-            shutil.move(entry.path, os.path.join(target, entry.name))
-            moved += 1
-        except OSError as e:
-            # A locked file means this entry stays put; the run still proceeds,
-            # overwriting it, which is what would have happened before anyway.
-            print(f"  could not archive {entry.name}: {e}")
-
-    print(f"Archived previous run ({size_mb:,.1f} MB, {moved} entries) "
-          f"to {os.path.join(RUNS_DIR_NAME, stamp)}")
-    _prune_runs(runs_dir, ARCHIVE_KEEP)
-
-    # Anything that could not be moved is still in place; clear it so a smaller
-    # run cannot leave stale results behind.
-    _delete_output_contents(skip)
-
-
 def main():
     # Clear previous results before anything writes, so analysis can never mix
     # this run's output with an earlier one's -- keeping them under runs/ where
     # the scenario is small enough to be worth it.
-    archive_output_dir()
+    OutputArchive.for_scenario(SCENARIO).archive_output_dir()
 
     # Created up front: plot_station_queues, the Excel export and the demand
     # files all write here long before the per-agent save loop, so creating
@@ -1139,6 +1039,23 @@ def main():
     stations = {swap_nodes[i]: SwapStation(feat["properties"].get("facility_id", i), int(feat["properties"].get("posts", 2))) for i, feat in enumerate(station_data["features"])}
 
     total_seconds = int((DAY_END - DAY_START).total_seconds())
+
+    # One row per station per timestep, plus a header. Checked here rather than
+    # at write time so a run that cannot produce the spreadsheet does not spend
+    # the whole simulation building the rows for it first.
+    global RECORD_TIMESTEPS
+    steps = -(-total_seconds // SIMULATION_INTERVAL_SEC)
+    projected_rows = steps * len(stations) + 1
+    if projected_rows > EXCEL_MAX_ROWS:
+        RECORD_TIMESTEPS = False
+        print(f"\nNot recording per-timestep station detail: {steps:,} steps x "
+              f"{len(stations)} station(s) is {projected_rows:,} rows, and an "
+              f"xlsx sheet holds {EXCEL_MAX_ROWS:,}.\n"
+              f"  {os.path.basename(SWAP_EXCEL_OUTPUT)} will not be written, and "
+              f"the swap station animation has nothing to replay.\n"
+              f"  Everything else the run produces is unaffected. To get the "
+              f"file, raise simulation_step_sec or shorten the period.\n")
+
     agent_counts = NUM_AGENTS_CFG if isinstance(NUM_AGENTS_CFG, list) else [NUM_AGENTS_CFG]
     num_periods, period_duration = len(agent_counts), total_seconds / len(agent_counts)
 
@@ -1151,6 +1068,10 @@ def main():
                    field, swap_rows, taxi_rows, swap_dist_m)
     init_worker(*worker_args)
     print(f"Mode: {SIM_MODE}")
+    if DEMAND_MODEL and RETURN_TO_BASE:
+        print(f"  return to base: idle vehicles drive home when nothing is due "
+              f"within {RETURN_TO_BASE_HORIZON_SEC // 60} min, or when they "
+              f"have sat away from base for {RETURN_TO_BASE_IDLE_SEC // 60} min")
     if DISTRIBUTION_MODE:
         print(f"  distributions: {os.path.basename(TRIP_BANDS_SOURCE)}")
         print(f"  trip distance: {DISTANCE_BANDS.describe(1000.0, ' km')} "
@@ -1269,52 +1190,89 @@ def main():
                     a.agent_features.append(feat); a.time_features.append(feat)
                     a.busy_until, a.state = finish_s, "WAITING_COMPLETE"
                 elif a.marked_for_removal: retired_agents.append(a); continue
-                else: a.state = "IDLE"
+                else:
+                    # This runs on every timestep the vehicle stays idle, so the
+                    # clock is only started on the way in -- otherwise it would
+                    # reset to now each time and never reach an hour.
+                    if a.state != "IDLE":
+                        a.idle_since = s
+                    a.state = "IDLE"
             still_active.append(a)
         agents = still_active
         timestamp_str = (DAY_START + timedelta(seconds=s)).isoformat()
         for stat in stations.values(): stat.record_queue(s, timestamp_str)
 
+        # Whether the whole fleet has nothing coming. Fleet-wide rather than
+        # per agent: which vehicle serves a trip is not decided until the trip
+        # is released, so there is no per-agent answer to give. Demand still
+        # waiting now counts as work, even though its hour has passed -- it is
+        # unserved, not absent.
+        quiet_ahead = False
+        if DEMAND_MODEL and RETURN_TO_BASE:
+            horizon = (DAY_START + timedelta(
+                seconds=s + RETURN_TO_BASE_HORIZON_SEC)).isoformat()
+            quiet_ahead = (not unallocated_demand
+                           and not (trips and trips[0]["departure_time"] <= horizon))
+
         idle_idxs = [i for i, a in enumerate(agents) if a.state == "IDLE"]
         if len(idle_idxs) > 20:
-            requests = [request_for(agents[i], s) for i in idle_idxs]
+            requests = [request_for(agents[i], s, quiet_ahead) for i in idle_idxs]
             for i, up in zip(idle_idxs, pool.map(calculate_next_activity, requests)):
                 apply_update(agents[i], up)
         elif idle_idxs:
             for i in idle_idxs:
-                apply_update(agents[i], calculate_next_activity(request_for(agents[i], s)))
+                apply_update(agents[i],
+                             calculate_next_activity(request_for(agents[i], s, quiet_ahead)))
 
     pool.close(); retired_agents.extend(agents)
     plot_station_queues(stations, HISTOGRAM_PLOT)
 
-    # --- ADD THIS BLOCK FOR EXCEL EXPORT ---
-    all_swap_records = []
-    for stat in stations.values():
-        all_swap_records.extend(stat.timestep_records)
-        
-    cols = [
-        "station_id", "timestamp", "sim_step_sec", 
-        "swapping_count", "swapping_agent_ids", 
-        "queueing_count", "queueing_agent_ids"
-    ]
-    
-    formatted_swap_records = []
-    for record in all_swap_records:
-        station_id, timestamp_str, current_sec, swap_count, swap_ids, queue_count, queue_ids = record
-        formatted_swap_records.append((
-            station_id,
-            timestamp_str,
-            current_sec,
-            swap_count,
-            ", ".join(map(str, swap_ids)),
-            queue_count,
-            ", ".join(map(str, queue_ids))
-        ))
-        
-    df_swap = pd.DataFrame(formatted_swap_records, columns=cols)
-    df_swap.sort_values(by=["sim_step_sec", "station_id"], inplace=True)
-    df_swap.to_excel(SWAP_EXCEL_OUTPUT, index=False)
-    # ----------------------------------------
+    # Per-timestep station detail. Everything below this point -- the demand
+    # files and every agent track -- is written afterwards, so a failure here
+    # used to take the whole run with it after the simulating was already done.
+    # It is now reported and stepped over: the spreadsheet is the one output
+    # that can fail for reasons of size, and it is not worth the rest of the run.
+    if not RECORD_TIMESTEPS:
+        print(f"Skipping {os.path.basename(SWAP_EXCEL_OUTPUT)} -- the detail it "
+              f"holds was not recorded (see the note above).")
+    else:
+        all_swap_records = []
+        for stat in stations.values():
+            all_swap_records.extend(stat.timestep_records)
+
+        cols = [
+            "station_id", "timestamp", "sim_step_sec",
+            "swapping_count", "swapping_agent_ids",
+            "queueing_count", "queueing_agent_ids"
+        ]
+
+        formatted_swap_records = []
+        for record in all_swap_records:
+            station_id, timestamp_str, current_sec, swap_count, swap_ids, queue_count, queue_ids = record
+            formatted_swap_records.append((
+                station_id,
+                timestamp_str,
+                current_sec,
+                swap_count,
+                ", ".join(map(str, swap_ids)),
+                queue_count,
+                ", ".join(map(str, queue_ids))
+            ))
+
+        try:
+            df_swap = pd.DataFrame(formatted_swap_records, columns=cols)
+            df_swap.sort_values(by=["sim_step_sec", "station_id"], inplace=True)
+            df_swap.to_excel(SWAP_EXCEL_OUTPUT, index=False)
+        except Exception as e:
+            # Broad on purpose. The plausible causes are a row count the sheet
+            # cannot take, a MemoryError building the frame, and the file being
+            # open in Excel -- and none of them is a reason to lose the tracks.
+            print(f"\nCould not write {os.path.basename(SWAP_EXCEL_OUTPUT)} "
+                  f"({len(formatted_swap_records):,} rows): "
+                  f"{type(e).__name__}: {e}\n"
+                  f"  The run itself is fine and the rest of the output follows. "
+                  f"If the file is open in Excel, close it and re-run; if it is "
+                  f"the size, raise simulation_step_sec.\n")
 
     with open(os.path.join(OUTPUT_DIR, "met_demand.json"), "w") as f: json.dump(met_demand, f, default=to_serializable)
 

@@ -13,7 +13,7 @@ inside, so setting it wrong shifts every trip length in the run.
 
     python calibration/measure_deviation_factor.py --scenario scenario_accra.json
 
-Reads the agent tracks from <folder_name>/output/output_trips_time_queued: each
+Reads the agent tracks from <output_folder>/output_trips_time_queued: each
 trip is a LineString whose length_m property is the routed road distance, and
 whose first and last coordinates give the straight line. Any run produces these,
 so the measurement does not depend on which mode was simulated.

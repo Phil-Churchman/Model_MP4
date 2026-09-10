@@ -50,6 +50,11 @@ html, body { margin:0; padding:0; height:100%; display:flex; flex-direction:colu
   <label class="btn btn-outline-info btn-sm me-2" for="categoryImportInput">Import to Category</label>
   <input type="file" id="categoryImportInput" accept=".geojson,.json" style="display:none;">
   
+  <div class="vr mx-2"></div>
+  <button id="reloadScenarioBtn" class="btn btn-outline-secondary btn-sm"
+          title="Discard changes and reload both files from the scenario folder">Reload</button>
+  <span id="scenarioLabel" class="ms-2 text-muted small"></span>
+
   <span id="progress"></span>
 </div>
 
@@ -320,56 +325,170 @@ function showPopup(feature){
   popup.setPosition(feature.getGeometry().getCoordinates()); el.style.display='block';
 }
 
+// ---------------- SCENARIO AUTO-LOAD ----------------
+// Which scenario to open. The control panel links here with ?scenario=<file>
+// so the page follows its picker; opened directly -- typed in, bookmarked, or
+// served by Live Server -- there is no parameter and it falls back to
+// scenario.json. Same rule as animation.html, so the two agree about which
+// scenario is "current".
+function scenarioFile() {
+  const asked = new URLSearchParams(location.search).get("scenario");
+  if (!asked) return "scenario.json";
+  // A scenario id is either a bare scenario*.json at the Model root, or one
+  // inside a folder the dashboard reads scenario files from. It becomes part
+  // of a URL, so anything else is refused here rather than failing later as a
+  // confusing 404. Folders are listed rather than allowed generally: a path
+  // from a query string is not something to follow wherever it points.
+  const ROOTS = ["scenarios_shared", "scenarios_private"];
+  const parts = asked.replace(/\\/g, "/").split("/").filter(Boolean);
+  const name = parts.pop() || "";
+  const folder = parts.join("/");
+  if (!/^scenario[\w.-]*\.json$/i.test(name)
+      || (folder && !ROOTS.includes(folder))) {
+    console.warn(`Ignoring unusable ?scenario=${asked}; using scenario.json`);
+    return "scenario.json";
+  }
+  return folder ? folder + "/" + name : name;
+}
+const SCENARIO_FILE = scenarioFile();
+// This page lives in utilities/, so folder_name -- which is written relative to
+// the Model folder -- resolves against one level up, not against here.
+const MODEL_ROOT = new URL("../", location.href);
+const SCENARIO_URL = new URL(SCENARIO_FILE, MODEL_ROOT).href;
+
+async function fetchJSON(url){
+  const res = await fetch(url);
+  if(!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+function setScenarioLabel(text, isError){
+  const el = document.getElementById('scenarioLabel');
+  if(!el) return;
+  el.textContent = text;
+  el.classList.toggle('text-danger', !!isError);
+  el.classList.toggle('text-muted', !isError);
+}
+
+async function loadFromScenario(){
+  let scenario;
+  try{
+    scenario = await fetchJSON(SCENARIO_URL);
+  } catch(err){
+    // Opened straight off the filesystem rather than through a server, most
+    // likely: fetch cannot read file:// URLs. The manual Import buttons still
+    // work, so this is a note, not an error dialog.
+    setScenarioLabel(`${SCENARIO_FILE} could not be read - use Import`, true);
+    console.warn("Scenario load failed:", err);
+    return;
+  }
+
+  const folder = scenario.folder_name;
+  if(!folder){
+    setScenarioLabel(`${SCENARIO_FILE} has no folder_name`, true);
+    return;
+  }
+  const INPUT_DIR = new URL(folder + "/geojson_files/", MODEL_ROOT);
+  const AREA_URL = new URL("area.geojson", INPUT_DIR).href;
+  const POINTS_URL = new URL("demand_points.geojson", INPUT_DIR).href;
+
+  // Loaded independently. A scenario often has an area drawn before it has any
+  // demand points, and that is a normal state to open the editor in -- so a
+  // missing demand_points.geojson must not stop the area appearing.
+  const loaded = [];
+  try{
+    if(loadAreaGeoJSON(await fetchJSON(AREA_URL), {confirmReplace:false})) loaded.push("area");
+  } catch(err){ console.warn("No area.geojson:", err); }
+
+  try{
+    // fit:false -- the area was just fitted, and it is the wider of the two.
+    if(loadDemandPointsGeoJSON(await fetchJSON(POINTS_URL),
+                               {confirmReplace:false, fit:!loaded.length})){
+      lastImportedFacilityFilename = "demand_points.geojson";
+      loaded.push("demand points");
+    }
+  } catch(err){ console.warn("No demand_points.geojson:", err); }
+
+  const what = loaded.length ? loaded.join(" + ") : "nothing found";
+  setScenarioLabel(`${SCENARIO_FILE} - ${folder} (${what})`, !loaded.length);
+}
+
+document.getElementById('reloadScenarioBtn').addEventListener('click', ()=>{
+  if(facilitySource.getFeatures().length &&
+     !confirm("Reload from the scenario folder? Unsaved edits will be lost.")) return;
+  facilitySource.clear(); vectorSource.clear();
+  categories = []; categoryColors = {}; categoryVisibility = {};
+  renderCategories();
+  loadFromScenario();
+});
+
+loadFromScenario();
+
 // ---------------- MODIFY ----------------
 const modify = new ol.interaction.Modify({ source: facilitySource });
 map.addInteraction(modify);
 
 // ---------------- IMPORT / EXPORT ----------------
+// The body of each importer is split out from its file-input handler so the
+// scenario auto-load below can drive exactly the same code path. Anything that
+// only makes sense for a hand-picked file -- the overwrite confirmation, and
+// clearing the input so the same file can be chosen twice -- is passed in
+// rather than assumed, because on the automatic load there is nothing to
+// overwrite and no input to clear.
+function loadAreaGeoJSON(geojson, { confirmReplace = true } = {}){
+  const features = new ol.format.GeoJSON().readFeatures(geojson, {featureProjection:'EPSG:3857'});
+  if(confirmReplace && vectorSource.getFeatures().length &&
+     !confirm("Replace existing polygon?")) return false;
+  vectorSource.clear(); vectorSource.addFeatures(features);
+  if(features.length) map.getView().fit(vectorSource.getExtent(),{padding:[40,40,40,40], duration:600});
+  return true;
+}
+
 document.getElementById('fileInput').addEventListener('change', e=>{
   const file=e.target.files[0]; if(!file) return;
   const reader=new FileReader();
   reader.onload=ev=>{
     try{
-      const geojson=JSON.parse(ev.target.result);
-      const features=new ol.format.GeoJSON().readFeatures(geojson,{featureProjection:'EPSG:3857'});
-      if(vectorSource.getFeatures().length && !confirm("Replace existing polygon?")) return;
-      vectorSource.clear(); vectorSource.addFeatures(features);
-      if(features.length) map.getView().fit(vectorSource.getExtent(),{padding:[40,40,40,40], duration:600});
-      e.target.value=null;
+      if(loadAreaGeoJSON(JSON.parse(ev.target.result))) e.target.value=null;
     } catch(err){ alert("Invalid GeoJSON"); }
   };
   reader.readAsText(file);
 });
+
+function loadDemandPointsGeoJSON(geojson, { confirmReplace = true, fit = true } = {}){
+  let features=new ol.format.GeoJSON().readFeatures(geojson,{featureProjection:'EPSG:3857'});
+  features=features.filter(f=>f.getGeometry().getType()==='Point');
+  if(!features.length){ alert("No point features found."); return false; }
+  if(confirmReplace && facilitySource.getFeatures().length>0 &&
+     !confirm("Existing facilities will be deleted. Continue?")) return false;
+  facilitySource.clear();
+  let idField=null;
+  for(const key in features[0].getProperties()){ if(key!=='geometry' && /^id$|_id|id_/i.test(key)){ idField=key; break; } }
+  if(!idField) idField='facility_id';
+  let originalFields = Object.keys(features[0].getProperties()).filter(k=>k!=='geometry');
+  if(!originalFields.includes('weight_in_category')) originalFields.push('weight_in_category');
+
+  facilityIdField=idField; facilityOriginalFields=originalFields.filter(f=>f!==idField);
+  features.forEach(f=>{
+    f.set('___originalFields',originalFields);
+    f.set('___idField',idField);
+    if(f.get('weight_in_category') === undefined) f.set('weight_in_category', 1);
+  });
+  const maxId=Math.max(...features.map(f=>parseInt(f.get(idField))||0)); nextFacilityId=maxId+1;
+  facilitySource.addFeatures(features);
+  const cats = [...new Set(features.map(f=>f.get('category')).filter(c=>c))];
+  cats.forEach(c=>{ if(!categories.includes(c)){ categories.push(c); categoryColors[c]=randomColor(); categoryVisibility[c]=true; } });
+  renderCategories();
+  if(fit) map.getView().fit(facilitySource.getExtent(),{padding:[40,40,40,40], duration:600});
+  return true;
+}
 
 document.getElementById('facilityInput').addEventListener('change', e=>{
   const file = e.target.files[0]; if(!file) return; lastImportedFacilityFilename=file.name;
   const reader=new FileReader();
   reader.onload=ev=>{
     try{
-      let features=new ol.format.GeoJSON().readFeatures(JSON.parse(ev.target.result),{featureProjection:'EPSG:3857'});
-      features=features.filter(f=>f.getGeometry().getType()==='Point');
-      if(!features.length){ alert("No point features found."); return; }
-      if(facilitySource.getFeatures().length>0 && !confirm("Existing facilities will be deleted. Continue?")) return; facilitySource.clear();
-      let idField=null;
-      for(const key in features[0].getProperties()){ if(key!=='geometry' && /^id$|_id|id_/i.test(key)){ idField=key; break; } }
-      if(!idField) idField='facility_id';
-      let originalFields = Object.keys(features[0].getProperties()).filter(k=>k!=='geometry');
-      
-      if(!originalFields.includes('weight_in_category')) originalFields.push('weight_in_category');
-      
-      facilityIdField=idField; facilityOriginalFields=originalFields.filter(f=>f!==idField);
-      features.forEach(f=>{ 
-        f.set('___originalFields',originalFields); 
-        f.set('___idField',idField); 
-        if(f.get('weight_in_category') === undefined) f.set('weight_in_category', 1);
-      });
-      const maxId=Math.max(...features.map(f=>parseInt(f.get(idField))||0)); nextFacilityId=maxId+1;
-      facilitySource.addFeatures(features);
-      const cats = [...new Set(features.map(f=>f.get('category')).filter(c=>c))];
-      cats.forEach(c=>{ if(!categories.includes(c)){ categories.push(c); categoryColors[c]=randomColor(); categoryVisibility[c]=true; } });
-      renderCategories();
-      map.getView().fit(facilitySource.getExtent(),{padding:[40,40,40,40], duration:600});
-      e.target.value=null;
+      if(loadDemandPointsGeoJSON(JSON.parse(ev.target.result))) e.target.value=null;
     } catch(err){ alert("Invalid GeoJSON"); console.error(err); }
   };
   reader.readAsText(file);

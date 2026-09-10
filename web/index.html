@@ -88,9 +88,7 @@
 
   <header class="ap-page-head">
     <h1>EV-TRACS Control Panel</h1>
-    <p class="ap-lead mt-2">
-      Edit scenarios, see what each one has produced, and run the pipeline.
-    </p>
+
   </header>
 
   <div class="row g-4">
@@ -128,7 +126,7 @@
     </div>
 
     <!-- Pipeline + tasks + tools --------------------------------------->
-    <div class="col-xl-4 col-lg-6">
+    <div class="col-xl-4 col-lg-6" id="colMiddle">
       <div class="card mb-4">
         <div class="card-header d-flex align-items-center justify-content-between gap-2">
           <span class="card-title d-flex align-items-center gap-2">
@@ -143,7 +141,7 @@
         <div class="card-body"><div id="board"><span class="row-note">…</span></div></div>
       </div>
 
-      <div class="card mb-4">
+      <div class="card mb-4" id="tasksCard">
         <div class="card-header">
           <span class="card-title d-flex align-items-center gap-2">
             <i class="bi bi-play-circle text-body-secondary"></i> Tasks
@@ -152,7 +150,7 @@
         <div class="card-body"><div id="tasks"><span class="row-note">…</span></div></div>
       </div>
 
-      <div class="card">
+      <div class="card" id="toolsCard">
         <div class="card-header">
           <span class="card-title d-flex align-items-center gap-2">
             <i class="bi bi-window-stack text-body-secondary"></i> Tools
@@ -163,8 +161,8 @@
     </div>
 
     <!-- Output --------------------------------------------------------->
-    <div class="col-xl-4">
-      <div class="card mb-4">
+    <div class="col-xl-4" id="colRight">
+      <div class="card mb-4" id="outputCard">
         <div class="card-header d-flex align-items-center justify-content-between gap-2">
           <span class="card-title d-flex align-items-center gap-2">
             <i class="bi bi-terminal text-body-secondary"></i> Output
@@ -244,34 +242,6 @@
     </div>
   </div>
 
-  <!-- Folder picker ---------------------------------------------------->
-  <div class="modal fade" id="browseModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered">
-      <div class="modal-content">
-        <div class="modal-header">
-          <h5 class="modal-title">Choose scenario folder</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-        </div>
-        <div class="modal-body">
-          <div class="d-flex align-items-center gap-2 mb-2">
-            <button id="browseUp" class="btn btn-secondary btn-sm">
-              <i class="bi bi-arrow-90deg-up"></i>
-            </button>
-            <span id="browsePath" class="mono row-note flex-grow-1"></span>
-          </div>
-          <div id="browseList" class="ap-scroll" style="max-height:320px; overflow-y:auto;"></div>
-        </div>
-        <div class="modal-footer">
-          <span id="browseChosen" class="mono row-note me-auto"></span>
-          <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
-          <button type="button" id="browseSelect" class="btn btn-primary btn-sm">
-            Use this folder
-          </button>
-        </div>
-      </div>
-    </div>
-  </div>
-
   <hr class="ap-hairline">
   <p class="row-note">
     Same URL space as Live Server, so every tool works under either &mdash;
@@ -283,27 +253,162 @@
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 const $ = s => document.querySelector(s);
-let TASKS = [], TOOLS = [], TOOL_GROUPS = [];
+
+// Tasks sits at the top of the right-hand column when there is room for three,
+// so the button you press and the log it writes to are side by side. Below that
+// width the right column drops to full width underneath, which would put Tasks
+// below Tools and a long way from the pipeline it acts on -- so it goes back
+// under Pipeline instead.
+//
+// Moved rather than duplicated: renderTasks() writes into #tasks by id, and two
+// copies of that id would leave one of them permanently stale. The card is the
+// same element in both positions, so whatever is rendered moves with it.
+// 1200px is Bootstrap's xl breakpoint, which is exactly when col-xl-4 gives
+// three columns.
+const THREE_COLUMNS = window.matchMedia("(min-width: 1200px)");
+
+function placeTasksCard() {
+  const card = $("#tasksCard");
+  if (!card) return;
+  if (THREE_COLUMNS.matches) {
+    const output = $("#outputCard");
+    if (output && card.nextElementSibling !== output) output.before(card);
+  } else {
+    const tools = $("#toolsCard");
+    if (tools && card.nextElementSibling !== tools) tools.before(card);
+  }
+}
+
+THREE_COLUMNS.addEventListener("change", placeTasksCard);
+// Called directly as well as on DOMContentLoaded: this script sits below the
+// cards, so they already exist, and relying on the event alone would leave the
+// card in the wrong column if it had somehow already fired. Idempotent.
+document.addEventListener("DOMContentLoaded", placeTasksCard);
+placeTasksCard();
+let TASKS = [], TOOLS = [], TOOL_GROUPS = [], TASK_STAGES = [];
+
+// The board shows one mode's pipeline, not the union of all three. Anything the
+// selected scenario's mode does not read or write is hidden rather than greyed:
+// a demand-model run has no fare-wait distribution to fit and no taxi ranks to
+// place, and listing those invites producing files nothing will ever read.
+// Tasks and tools carry the modes they apply to; artefacts already carry the
+// server's own "optional" verdict, which means exactly the same thing.
+// Display names for the pipeline stages. The keys stay short because they are
+// dictionary keys on both the artefacts and the tasks; only the heading differs.
+const STAGE_LABELS = { model: "model outputs", process: "process tracked data" };
+const stageLabel = s => STAGE_LABELS[s] || s;
+
+function currentMode() {
+  return (SCENARIO && SCENARIO.simulation_mode) || null;
+}
+function relevant(item) {
+  const mode = currentMode();
+  if (!mode || !item.modes) return true;   // pre-mode API, or no scenario yet
+  return item.modes.includes(mode);
+}
+
+// The calibrate stage is for scenarios being fitted against captured GPS data,
+// which is a different activity from running a fleet, so it appears only in
+// calibration mode.
+const CALIBRATION = "calibration";
+function stageApplies(stage) {
+  return stage !== "calibrate" || currentMode() === CALIBRATION;
+}
 let SCENARIO = null, EDITS = {}, currentJob = null, logOffset = 0, poller = null;
 
 // Fields the editor exposes with a typed control. Anything in the file but not
 // listed here is still shown and still saved -- the server merges rather than
 // replaces, so an unrecognised key can never be dropped by saving.
+//
+// The optional fourth element carries per-field rules:
+//   modes       only offer the field in these simulation modes. Omitted means
+//               every mode. Each list below is what the code actually reads,
+//               traced to the line that reads it -- not what sounds relevant.
+//               A field hidden this way is not lost: it drops into the
+//               read-only list, with its value, and saving preserves it.
+//   whenAbsent  show this value when the key is missing from the file, instead
+//               of leaving the row out. Must equal what the model does with the
+//               key absent, or the panel reports settings the run is not using.
+//
+// Calibration is not a fleet run -- Simulation.py refuses it -- so it keeps
+// only the keys the calibration scripts themselves read.
+const RUNNABLE = ["hail_rank", "demand_model", "distribution"];
 const FIELDS = [
   ["folder_name",          "text",   "Path to the scenario folder, relative to Model/"],
+  // Results used to sit inside the scenario folder. They now have a path of
+  // their own, so a scenario can be shared without its several hundred MB of
+  // output. Absent means the old layout, <folder_name>/output, which is what
+  // the model still falls back to -- so the row is left out rather than
+  // inventing a value, the same rule every other field follows.
+  ["output_folder",        "text",   "Path to the results folder, relative to Model/. Absent means <folder_name>/output"],
   ["simulation_mode",      "mode",   "Which of the three simulation modes to run"],
+  // Read by Simulation.py and by captured_trips_to_geojson.py, so it matters
+  // while calibrating as well as while running.
   ["speed_based_routing",  "bool",   "Route on travel time rather than distance"],
-  ["agents",               "ints",   "Fleet size per period, comma separated"],
-  ["animation_agents",     "int",    "How many agents animation.html loads"],
-  ["probability_hail",     "float",  ""],
-  ["swap_wait_sec",        "int",    ""],
-  ["max_total_distance_m", "int",    ""],
-  ["buffer_distance",      "int",    ""],
-  ["passenger_max_dist",   "int",    "Longest fare, metres"],
-  ["passenger_min_dist",   "int",    "Shortest fare, metres (0 for none)"],
-  ["simulation_step_sec",  "int",    ""],
-  ["deviation_factor",     "float",  "Road distance / straight-line distance"],
-  ["pickup_wait_sec",      "int",    "distribution mode: dwell at the pickup point"],
+  ["agents",               "ints",   "Fleet size per period, comma separated",
+                                     { modes: RUNNABLE }],
+  ["start_time",           "datetime", "First timestep of the simulated period",
+                                     { modes: RUNNABLE }],
+  ["end_time",             "datetime", "Last timestep; the period is start to end",
+                                     { modes: RUNNABLE }],
+  ["animation_agents",     "int",    "How many agents animation.html loads",
+                                     { modes: RUNNABLE }],
+  // Only hail-rank chooses between hailing and a rank; the branch that reads
+  // this is inside `if SIM_MODE == HAIL_RANK`.
+  ["probability_hail",     "float",  "Chance of hailing rather than working a rank",
+                                     { modes: ["hail_rank"] }],
+  ["swap_wait_sec",        "int",    "", { modes: RUNNABLE }],
+  ["max_total_distance_m", "int",    "", { modes: RUNNABLE }],
+  ["buffer_distance",      "int",    "", { modes: RUNNABLE }],
+  // The ball this sizes is only searched on the non-distribution path of
+  // get_target_node, and demand-model trips come from the generator with their
+  // destination already chosen -- so hail-rank is the only mode that reads it.
+  ["passenger_max_dist",   "int",    "Longest fare, metres", { modes: ["hail_rank"] }],
+  // Applied both to the sampled ball (hail-rank) and to the drawn band
+  // (distribution). Demand-model destinations are given, so it cannot apply.
+  ["passenger_min_dist",   "int",    "Shortest fare, metres (0 for none)",
+                                     { modes: ["hail_rank", "distribution"] }],
+  ["simulation_step_sec",  "int",    "", { modes: RUNNABLE }],
+  // Sizes the search ball in hail-rank and converts drawn road distances to
+  // straight lines in distribution. Demand model needs neither. Kept in
+  // calibration because measure_deviation_factor.py reads it, to report what
+  // the scenario assumed against what it measured.
+  ["deviation_factor",     "float",  "Road distance / straight-line distance",
+                                     { modes: ["hail_rank", "distribution", "calibration"] }],
+  ["pickup_wait_sec",      "int",    "distribution mode: dwell at the pickup point",
+                                     { modes: ["distribution"] }],
+  // Only the demand model generates trips from frequency profiles, so it is
+  // the only mode with daily frequencies to vary. Absent means a flat run,
+  // which is trip_demand_generator's own default, so 0 is shown rather than
+  // the row being hidden -- the setting exists for every demand-model
+  // scenario, whether or not the file has got round to saying so.
+  ["daily_variation",      "float",  "Day-to-day demand variation, as a coefficient of variation (0 = none)",
+                                     { modes: ["demand_model"], whenAbsent: 0 }],
+  ["return_to_base",       "bool",   "Send idle vehicles home when no trip is due anywhere within the hour, or when they have sat away from base for an hour",
+                                     { modes: ["demand_model"], whenAbsent: false }],
+
+  // Read by battery_charge_profile.py, which runs off the swap activity a run
+  // produces -- so they belong to every mode that runs a fleet, and to none
+  // that does not. No whenAbsent on most of them: the analysis refuses to
+  // guess a charge rate or an efficiency, so there is no absent-value to show.
+  // charge_slot_switch_time is the exception -- it genuinely defaults to 0.
+  "Battery charging",
+  ["kwh_per_km",           "float",  "Energy the battery spends per km, kWh",
+                                     { modes: RUNNABLE }],
+  ["charge_rate",          "float",  "What one charger puts into a battery, kW",
+                                     { modes: RUNNABLE }],
+  ["charge_efficiency",    "float",  "Share of metered energy reaching the battery, 0-1",
+                                     { modes: RUNNABLE }],
+  ["total_charge_slots",   "int",    "Chargers at each station",
+                                     { modes: RUNNABLE }],
+  ["charge_slot_switch_time", "int", "Changeover before a free slot takes the next battery, seconds",
+                                     { modes: RUNNABLE, whenAbsent: 0 }],
+  ["charge_strategy",      "strategy", "How the charging queue is served",
+                                     { modes: RUNNABLE }],
+  ["charge_window_start",  "timeofday", "window strategy only: when charging may start",
+                                     { modes: RUNNABLE }],
+  ["charge_window_end",    "timeofday", "window strategy only: when all charging stops",
+                                     { modes: RUNNABLE }],
 ];
 
 // Kept in step with SIMULATION_MODES in scenario_config.py.
@@ -311,8 +416,33 @@ const SIM_MODES = [
   ["hail_rank",    "Hail / rank"],
   ["demand_model", "Demand model"],
   ["distribution", "Distribution"],
+  ["calibration",  "Calibration"],
 ];
-const FIELD_KEYS = new Set(FIELDS.map(f => f[0]));
+// Kept in step with STRATEGIES in utilities/battery_charge_profile.py.
+const CHARGE_STRATEGIES = [
+  ["immediate", "Immediate"],
+  ["window",    "Window"],
+];
+// Field types that render as a dropdown, and what they offer.
+const SELECTS = { mode: SIM_MODES, strategy: CHARGE_STRATEGIES };
+
+// A bare string in FIELDS is a heading, not a field, so it has no options.
+const FIELD_OPTS = new Map(FIELDS.filter(Array.isArray)
+                                 .map(([key, , , opts]) => [key, opts || {}]));
+
+// Neither is the panel's business: "note" is prose for whoever opens the file,
+// and sync_evtracs belongs to the EV-TRACS integration. Hidden rather than made
+// editable, and untouched on save -- the server merges into the file it read,
+// so a key the editor never sends survives.
+const HIDDEN_KEYS = new Set(["note", "sync_evtracs"]);
+
+// A scenario is identified by "<root>/<file>.json". Each segment is encoded
+// separately so the slash stays a slash: encodeURIComponent on the whole id
+// would turn it into %2F, which the route's path parameter does not match.
+function scenarioUrl(id, suffix = "") {
+  return "/api/scenarios/"
+    + String(id).split("/").map(encodeURIComponent).join("/") + suffix;
+}
 
 async function api(path, opts) {
   const res = await fetch(path, opts);
@@ -326,30 +456,62 @@ async function api(path, opts) {
 
 // ---------- scenario ----------
 async function loadScenarios() {
-  const { scenarios } = await api("/api/scenarios");
+  const { scenarios, roots } = await api("/api/scenarios");
   const sel = $("#scenarioSelect");
   sel.innerHTML = "";
-  for (const s of scenarios) {
+
+  if (!scenarios.length) {
+    // Nothing to select is a state the rest of the panel cannot render, so it
+    // says why here instead of failing on the first fetch.
     const opt = document.createElement("option");
-    opt.value = s.file;
-    opt.textContent = s.file + (s.active ? "  (active)" : "");
-    if (s.active) opt.selected = true;
+    opt.textContent = "no scenario files found";
+    opt.disabled = true;
     sel.appendChild(opt);
+    $("#scenarioInfo").innerHTML = `<div class="row-note">
+      No scenario*.json in ${(roots || []).join(" or ")}.</div>`;
+    return;
+  }
+
+  // Grouped by folder, so the option text can be the filename alone: the id is
+  // "<root>/<file>.json" and repeating the root on every line is noise once the
+  // group heading has said it.
+  for (const root of roots || []) {
+    const inRoot = scenarios.filter(s => s.file.startsWith(root + "/"));
+    if (!inRoot.length) continue;
+    const group = document.createElement("optgroup");
+    group.label = root;
+    for (const s of inRoot) {
+      const opt = document.createElement("option");
+      opt.value = s.file;
+      opt.textContent = s.file.slice(root.length + 1)
+        + (s.active ? "  (active)" : "") + (s.ok ? "" : "  (unreadable)");
+      if (s.active) opt.selected = true;
+      group.appendChild(opt);
+    }
+    sel.appendChild(group);
   }
   await showScenario();
 }
 
 async function showScenario() {
-  SCENARIO = await api(`/api/scenarios/${encodeURIComponent($("#scenarioSelect").value)}`);
+  SCENARIO = await api(scenarioUrl($("#scenarioSelect").value));
   EDITS = {};
   markClean();
   $("#scenarioInfo").innerHTML = `
     <div class="mono row-note mb-2">${SCENARIO.folder}</div>
     <span class="ap-pill ${SCENARIO.folder_exists ? "is-live" : "is-error"}">
-      ${SCENARIO.folder_exists ? "folder found" : "folder missing"}</span>`;
+      ${SCENARIO.folder_exists ? "folder found" : "folder missing"}</span>
+    ${SCENARIO.simulation_mode
+      ? `<span class="ap-pill is-info ms-1"
+               title="Only the pipeline, tasks and tools this mode uses are shown"
+         >${SCENARIO.simulation_mode}</span>` : ""}`;
   renderEditor();
   renderBoard();
-  if (TOOLS.length) renderTools();   // keep each tool link's ?scenario= current
+  // Both lists depend on the mode as well as on the scenario path, so they are
+  // re-rendered here rather than only at start-up. renderTools also keeps each
+  // link's ?scenario= current.
+  if (TASKS.length) renderTasks();
+  if (TOOLS.length) renderTools();
 }
 
 // ---------- editor ----------
@@ -357,12 +519,31 @@ function renderEditor() {
   const cfg = SCENARIO.config;
   const rows = [];
 
-  for (const [key, type, help] of FIELDS) {
-    if (!(key in cfg)) continue;                    // absent keys are not invented
-    rows.push(fieldRow(key, type, cfg[key], help));
+  // Keys the editor actually put a control on. Anything else in the file goes
+  // in the read-only list below -- including a field skipped here because the
+  // mode does not use it, which is still in the file and still saved.
+  const shown = new Set();
+
+  const mode = currentMode();
+  // A heading is held back until something under it actually renders, so a
+  // group whose every field is hidden by the mode leaves no empty label.
+  let heading = null;
+  for (const entry of FIELDS) {
+    if (!Array.isArray(entry)) { heading = entry; continue; }
+    const [key, type, help, opts = {}] = entry;
+    // No mode at all is an unmigrated file, not a mode that uses nothing:
+    // filtering on it would empty the panel. Same rule as relevant().
+    if (mode && opts.modes && !opts.modes.includes(mode)) continue;
+    const absent = !(key in cfg);
+    // Absent keys are not invented, unless the field says what absent means.
+    if (absent && opts.whenAbsent === undefined) continue;
+    if (heading) { rows.push(`<div class="group-label">${heading}</div>`); heading = null; }
+    rows.push(fieldRow(key, type, absent ? opts.whenAbsent : cfg[key], help, absent));
+    shown.add(key);
   }
 
-  const unknown = Object.keys(cfg).filter(k => !FIELD_KEYS.has(k));
+  const unknown = Object.keys(cfg)
+    .filter(k => !shown.has(k) && !HIDDEN_KEYS.has(k));
   if (unknown.length) {
     rows.push(`<div class="group-label">not editable here &mdash; preserved on save</div>`);
     for (const k of unknown) {
@@ -376,9 +557,6 @@ function renderEditor() {
   }
   $("#editor").innerHTML = rows.join("");
 
-  const browseBtn = $("#browseBtn");
-  if (browseBtn) browseBtn.onclick = () => openBrowser(cfg.folder_name);
-
   $("#editor").querySelectorAll("[data-key]").forEach(el => {
     el.oninput = el.onchange = () => {
       const key = el.dataset.key, type = el.dataset.type;
@@ -387,14 +565,20 @@ function renderEditor() {
         value = parseField(type, el.type === "checkbox" ? el.checked : el.value);
       } catch { el.classList.add("is-invalid"); return; }
       el.classList.remove("is-invalid");
-      if (JSON.stringify(value) === JSON.stringify(SCENARIO.config[key])) delete EDITS[key];
+      // For a key not in the file, the baseline is the placeholder shown --
+      // otherwise re-typing it would count as a change and write a key that
+      // says exactly what its absence already said.
+      const baseline = key in SCENARIO.config
+        ? SCENARIO.config[key]
+        : (FIELD_OPTS.get(key) || {}).whenAbsent;
+      if (JSON.stringify(value) === JSON.stringify(baseline)) delete EDITS[key];
       else EDITS[key] = value;
       markDirty();
     };
   });
 }
 
-function fieldRow(key, type, value, help) {
+function fieldRow(key, type, value, help, absent) {
   const common = `data-key="${key}" data-type="${type}" class="form-control form-control-sm cfg-input"`;
   let control;
   if (type === "bool") {
@@ -402,33 +586,68 @@ function fieldRow(key, type, value, help) {
         <input type="checkbox" data-key="${key}" data-type="bool"
                class="form-check-input" ${value ? "checked" : ""}>
       </div>`;
-  } else if (type === "mode") {
-    const opts = SIM_MODES.map(([v, label]) =>
+  } else if (SELECTS[type]) {
+    const opts = SELECTS[type].map(([v, label]) =>
       `<option value="${v}" ${v === value ? "selected" : ""}>${label}</option>`).join("");
     control = `<select ${common} style="max-width:14rem">${opts}</select>`;
+  } else if (type === "timeofday") {
+    // Stored as [hour, minute], which is what the charge window is written as
+    // in the scenario file and what _time_of_day reads back.
+    control = `<input type="time" ${common} style="max-width:14rem"
+                 value="${toTimeOfDay(value)}">`;
+  } else if (type === "datetime") {
+    // The scenario stores [Y, M, D, h, m, s] -- the argument list Python's
+    // datetime() takes, so month is 1-based and needs no shifting either way.
+    control = `<input type="datetime-local" step="1" ${common}
+                 style="max-width:14rem" value="${toLocalDateTime(value)}">`;
   } else if (type === "ints") {
     control = `<input type="text" ${common} value="${value.join(", ")}">`;
-  } else if (key === "folder_name") {
-    // A browser cannot produce a filesystem path from a native picker, so the
-    // Browse button opens a directory listing served by /api/browse instead.
-    control = `<span class="input-group input-group-sm" style="max-width:14rem">
-        <input type="text" ${common} style="max-width:none"
-               value="${String(value).replace(/"/g, "&quot;")}">
-        <button class="btn btn-secondary" type="button" id="browseBtn"
-                title="Browse for a folder"><i class="bi bi-folder2-open"></i></button>
-      </span>`;
   } else {
     control = `<input type="${type === "text" ? "text" : "number"}"
                  ${type === "float" ? 'step="any"' : ""} ${common}
                  value="${String(value).replace(/"/g, "&quot;")}">`;
   }
   return `<div class="row-item">
-      <span class="mono" title="${help}">${key}</span>
+      <span class="mono" title="${help}">${key}${absent
+        ? ` <span class="row-note">not in file &mdash; saved if you change it</span>`
+        : ""}</span>
       <span>${control}</span>
     </div>`;
 }
 
+const pad = (n, w = 2) => String(n).padStart(w, "0");
+
+function toTimeOfDay(parts) {
+  if (!Array.isArray(parts) || !parts.length) return "";
+  const [h = 0, m = 0] = parts;
+  return `${pad(h)}:${pad(m)}`;
+}
+
+function toLocalDateTime(parts) {
+  if (!Array.isArray(parts) || parts.length < 3) return "";
+  const [y, mo, d, h = 0, mi = 0, sec = 0] = parts;
+  return `${pad(y, 4)}-${pad(mo)}-${pad(d)}T${pad(h)}:${pad(mi)}:${pad(sec)}`;
+}
+
 function parseField(type, raw) {
+  if (type === "datetime") {
+    // Parsed by hand rather than through Date(): the value is a wall clock the
+    // simulation reads literally, and Date() would drag it through the
+    // browser's timezone on the way in and back out again.
+    const m = String(raw).match(
+      /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/);
+    if (!m) throw 0;
+    const parts = [+m[1], +m[2], +m[3], +m[4], +m[5], +(m[6] || 0)];
+    if (parts[1] < 1 || parts[1] > 12 || parts[2] < 1 || parts[2] > 31) throw 0;
+    return parts;
+  }
+  if (type === "timeofday") {
+    const m = String(raw).match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+    if (!m) throw 0;
+    const parts = [+m[1], +m[2]];
+    if (parts[0] > 24 || parts[1] > 59) throw 0;
+    return parts;
+  }
   if (type === "bool")  return !!raw;
   if (type === "int")   { const n = parseInt(raw, 10); if (isNaN(n)) throw 0; return n; }
   if (type === "float") { const n = parseFloat(raw);   if (isNaN(n)) throw 0; return n; }
@@ -452,7 +671,7 @@ function markClean() { EDITS = {}; markDirty(); $("#saveMsg").textContent = ""; 
 $("#saveBtn").onclick = async () => {
   $("#saveBtn").disabled = true;
   try {
-    const r = await api(`/api/scenarios/${encodeURIComponent(SCENARIO.file)}`, {
+    const r = await api(scenarioUrl(SCENARIO.file), {
       method: "PUT", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ config: EDITS, mtime: SCENARIO.mtime })
     });
@@ -491,10 +710,16 @@ function updateCopyPreview() {
   const name = $("#copyName").value.trim();
   $("#copyGo").disabled = !name;
   if (!name) { $("#copyPreview").textContent = ""; return; }
-  const parent = String(SCENARIO.folder_name).replace(/\/[^/]*$/, "");
+  const parentOf = p => String(p).replace(/\/[^/]*$/, "");
+  // The copy is made beside the original: same scenario folder, same inputs
+  // folder, and -- when the scenario keeps its results outside -- its own
+  // output folder beside the original's rather than a share of it.
+  const root = parentOf(SCENARIO.file);
+  const out = SCENARIO.config && SCENARIO.config.output_folder;
   $("#copyPreview").innerHTML = `Will create:
-    <div class="mono mt-1">scenario_${slug(name)}.json</div>
-    <div class="mono">${parent}/${name}</div>`;
+    <div class="mono mt-1">${root}/scenario_${slug(name)}.json</div>
+    <div class="mono">${parentOf(SCENARIO.folder_name)}/${name}</div>`
+    + (out ? `<div class="mono">${parentOf(out)}/${name}</div>` : "");
 }
 $("#copyName").oninput = updateCopyPreview;
 
@@ -502,7 +727,7 @@ $("#copyGo").onclick = async () => {
   $("#copyGo").disabled = true;
   $("#copyMsg").innerHTML = '<span class="ap-pill">copying…</span>';
   try {
-    const r = await api(`/api/scenarios/${encodeURIComponent(SCENARIO.file)}/copy`, {
+    const r = await api(scenarioUrl(SCENARIO.file, "/copy"), {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ new_name: $("#copyName").value.trim(),
                              include_output: $("#copyOutput").checked })
@@ -520,68 +745,24 @@ $("#copyGo").onclick = async () => {
   }
 };
 
-// ---------- folder picker ----------
-// The browser cannot hand a page a filesystem path -- neither <input
-// webkitdirectory> nor showDirectoryPicker() exposes one -- so this walks
-// /api/browse and writes the chosen path straight into the folder_name field.
-let browseAt = null;
-const browseModal = new bootstrap.Modal($("#browseModal"));
-
-async function openBrowser(startFrom) {
-  // Open where the current value points, so the folder you want is usually
-  // already on screen. Falls back to the root if it no longer exists.
-  const parent = String(startFrom || "").replace(/\/[^/]*$/, "");
-  try { await browseTo(parent || ".."); }
-  catch { await browseTo(".."); }
-  browseModal.show();
-}
-
-async function browseTo(path) {
-  const d = await api(`/api/browse?path=${encodeURIComponent(path)}`);
-  browseAt = d;
-  $("#browsePath").textContent = d.path === "." ? "Model" : d.path;
-  $("#browseUp").disabled = !d.parent;
-  $("#browseChosen").textContent = d.path;
-  $("#browseSelect").disabled = d.path === "." || !d.path;
-
-  $("#browseList").innerHTML = d.entries.length
-    ? d.entries.map(e => `
-        <div class="row-item" data-dir="${e.path.replace(/"/g, "&quot;")}"
-             style="cursor:pointer">
-          <span><i class="bi ${e.is_scenario ? "bi-folder-check" : "bi-folder"} me-2"></i>${e.name}</span>
-          <span class="row-note">${
-            e.is_scenario ? "scenario" + (e.has_output ? " · has output" : "") : ""
-          } <i class="bi bi-chevron-right ms-2"></i></span>
-        </div>`).join("")
-    : '<div class="row-note p-2">No sub-folders here.</div>';
-
-  $("#browseList").querySelectorAll("[data-dir]").forEach(el =>
-    el.onclick = () => browseTo(el.dataset.dir));
-}
-
-$("#browseUp").onclick = () => { if (browseAt && browseAt.parent) browseTo(browseAt.parent); };
-
-$("#browseSelect").onclick = () => {
-  if (!browseAt) return;
-  const input = document.querySelector('[data-key="folder_name"]');
-  if (input) {
-    input.value = browseAt.path;
-    input.dispatchEvent(new Event("input"));   // reuse the normal dirty-tracking
-  }
-  browseModal.hide();
-};
-
 // ---------- pipeline board ----------
 function renderBoard() {
   const byStage = {};
-  for (const a of SCENARIO.artefacts) (byStage[a.stage] ||= []).push(a);
+  // "optional" is the server saying this mode never reads the artefact.
+  for (const a of SCENARIO.artefacts.filter(a => a.status !== "optional"))
+    (byStage[a.stage] ||= []).push(a);
 
-  $("#board").innerHTML = (SCENARIO.stages || Object.keys(byStage)).map(stage => {
+  $("#board").innerHTML = (SCENARIO.stages || Object.keys(byStage))
+    .filter(stage => stageApplies(stage) && (byStage[stage] || []).length)
+    .map(stage => {
     const items = byStage[stage] || [];
-    return `<div class="group-label">${stage}</div>` + items.map(a => `
+    return `<div class="group-label">${stageLabel(stage)}</div>` + items.map(a => `
       <div class="row-item" title="${a.path}">
         <span><span class="dot dot-${a.status}"></span>${a.label}</span>
-        <span class="row-note">${describe(a)}</span>
+        <span class="row-note">
+          ${describe(a)}
+          ${previewButtons(a.previews, "ms-2")}
+        </span>
       </div>`).join("");
   }).join("");
 }
@@ -590,7 +771,7 @@ function describe(a) {
   if (a.status === "missing")  return "missing";
   if (a.status === "optional") return "not used in this mode";
   if (a.status === "stale")
-    return `stale &mdash; ${a.stale_because.join(", ")} is newer`;
+    return `stale &mdash; older than ${a.stale_because.join(", ")}`;
   if (a.count !== undefined) return `${a.count} files`;
   if (a.size !== undefined) {
     const kb = a.size / 1024;
@@ -601,25 +782,72 @@ function describe(a) {
 
 // ---------- tasks ----------
 async function loadTasks() {
-  const { tasks } = await api("/api/tasks");
-  TASKS = tasks;
-  const byStage = {};
-  for (const t of tasks) (byStage[t.stage] ||= []).push(t);
+  const r = await api("/api/tasks");
+  TASKS = r.tasks;
+  TASK_STAGES = r.stages || [];
+  renderTasks();
+}
 
-  $("#tasks").innerHTML = Object.entries(byStage).map(([stage, items]) => `
-    <div class="group-label">${stage}</div>
-    ${items.map(t => `
+// Figures a task has already produced, linked from its row. Rendered only when
+// the file exists, which is also why this is per-scenario rather than baked
+// into the task list fetched once at start-up.
+function previewLinks(t) {
+  const shots = (SCENARIO && SCENARIO.task_previews
+                 && SCENARIO.task_previews[t.id]) || [];
+  if (!shots.length) return "";
+  return `<span class="d-block mt-1">${previewButtons(shots, "me-1")}</span>`;
+}
+
+// One figure gets a plain PNG button. Several get the part of the filename
+// that differs -- battery_charge_load / battery_charge_states become "load"
+// and "states" -- because two buttons both saying PNG say nothing about which
+// is which, and the tooltip only helps once you have already hovered.
+function previewLabels(shots) {
+  if (shots.length < 2) return shots.map(() => "PNG");
+  const stems = shots.map(p => p.name.replace(/\.[^.]+$/, "").split(/[_-]/));
+  let common = 0;
+  while (stems.every(w => w.length > common + 1 && w[common] === stems[0][common]))
+    common++;
+  return stems.map(w => w.slice(common).join(" "));
+}
+
+function previewButtons(shots, spacing) {
+  if (!shots || !shots.length) return "";
+  const labels = previewLabels(shots);
+  return shots.map((p, i) =>
+    `<a class="btn btn-sm btn-outline-secondary ${spacing} py-0"
+        href="${p.url}" target="_blank" rel="noopener"
+        title="${p.name}">${labels[i]}</a>`).join("");
+}
+
+// Split from loadTasks so switching scenario re-filters without re-fetching.
+function renderTasks() {
+  // Hidden, not disabled, when the inputs are absent: a greyed Run button
+  // still reads as "this is part of the pipeline", and the point is that for
+  // this scenario it is not yet.
+  const hasInputs = t => !SCENARIO || !SCENARIO.task_available
+                      || SCENARIO.task_available[t.id] !== false;
+
+  const byStage = {};
+  for (const t of TASKS.filter(t => relevant(t) && stageApplies(t.stage) && hasInputs(t)))
+    (byStage[t.stage] ||= []).push(t);
+
+  // Ordered by the pipeline, not by the order tasks happen to be registered in
+  // -- which put "analyse" first and "inputs" third.
+  const stages = (TASK_STAGES.length ? TASK_STAGES : Object.keys(byStage))
+    .filter(stage => (byStage[stage] || []).length);
+
+  $("#tasks").innerHTML = stages.map(stage => `
+    <div class="group-label">${stageLabel(stage)}</div>
+    ${byStage[stage].map(t => `
       <div class="row-item">
         <span class="me-2">
           <span class="d-block">${t.label}
             ${t.safety === "destructive"
               ? '<span class="ap-pill is-error ms-1">terminal only</span>' : ""}
-            ${t.irreversible
-              ? '<span class="ap-pill is-error ms-1">no undo</span>'
-              : t.needs_confirmation
-              ? '<span class="ap-pill is-warn ms-1">confirms</span>' : ""}
           </span>
           <span class="row-note">${t.description}</span>
+          ${previewLinks(t)}
         </span>
         <button class="btn btn-sm ${t.runnable ? "btn-primary" : "btn-secondary"}"
                 data-task="${t.id}" ${t.runnable ? "" : "disabled"}
@@ -642,28 +870,46 @@ async function loadTools() {
 // always matches what the picker currently shows.
 function renderTools() {
   const scenario = $("#scenarioSelect").value;
-  const byGroup = {};
-  for (const t of TOOLS) (byGroup[t.group] ||= []).push(t);
+  // A tool whose input files are absent is dropped rather than shown greyed:
+  // both captured-data tools open a file picker, so nothing would stop you
+  // opening one against a scenario that has no capture and getting an empty
+  // screen with no explanation. An empty group disappears with its contents.
+  const available = t => !SCENARIO || !SCENARIO.tool_available
+                      || SCENARIO.tool_available[t.key] !== false;
 
-  const titles = { view: "view & animate", edit: "edit inputs" };
-  $("#tools").innerHTML = TOOL_GROUPS.map(g => `
+  const byGroup = {};
+  for (const t of TOOLS.filter(t => relevant(t) && available(t)))
+    (byGroup[t.group] ||= []).push(t);
+
+  const titles = {
+    captured: "view captured vehicle data",
+    view: "view simulation",
+    edit: "edit inputs",
+  };
+  $("#tools").innerHTML = TOOL_GROUPS.filter(g => (byGroup[g] || []).length).map(g => `
     <div class="group-label">${titles[g] || g}</div>
     ${(byGroup[g] || []).map(t => {
       if (!t.exists) return `
         <div class="row-item row-note">
           <span>${t.label}</span><span>missing</span>
         </div>`;
+      // A tool URL may already carry a query of its own -- the taxi-rank entry
+      // is the facilities editor with ?facilities= on it -- so the separator
+      // has to be chosen, not assumed.
+      const sep = t.url.includes("?") ? "&" : "?";
       const href = t.accepts_scenario
-        ? `${t.url}?scenario=${encodeURIComponent(scenario)}` : t.url;
-      const tag = t.accepts_scenario
-        ? `<span class="ap-pill is-info ms-1"
-                 title="Opens showing the scenario selected above. Opened directly
-                        it falls back to scenario.json.">${scenario.replace(/\.json$/, "")}</span>`
+        ? `${t.url}${sep}scenario=${encodeURIComponent(scenario)}` : t.url;
+      // Which scenario the link carries used to be a pill beside every label,
+      // repeating the picker above once per row. The query string still goes on
+      // the href; the fact that it does, and what happens without it, moves
+      // into the tooltip.
+      const note = t.accepts_scenario
+        ? ` — opens with ${scenario}; opened directly it falls back to scenario.json`
         : "";
       return `
         <a class="row-item" href="${href}" target="_blank" rel="noopener"
-           title="${t.description}">
-          <span>${t.label}${tag}</span>
+           title="${t.description}${note}">
+          <span>${t.label}</span>
           <span class="row-note"><i class="bi bi-box-arrow-up-right"></i></span>
         </a>`;
     }).join("")}

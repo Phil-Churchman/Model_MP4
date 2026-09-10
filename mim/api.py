@@ -38,12 +38,62 @@ manager = JobManager(cwd=MODEL_DIR)
 # SCENARIOS
 # ============================================================
 
+# Where scenario files live. The scenario.json in the Model root is deliberately
+# not one of these: it is a copy of whichever scenario is currently selected,
+# kept there so a script run without --scenario picks it up, and listing it
+# beside the original offered the same scenario twice under two names -- with
+# edits to one silently not reaching the other.
+SCENARIO_ROOTS = ("scenarios_shared", "scenarios_private")
+
+# The copy the command line falls back to. Not listed, but still worth pointing
+# at: which of the listed scenarios it currently holds is what "active" reports.
+ACTIVE_COPY = os.path.join(MODEL_DIR, "scenario.json")
+
+
 def scenario_files():
-    return sorted(glob.glob(os.path.join(MODEL_DIR, "scenario*.json")))
+    """
+    Every scenario file, as absolute paths.
+
+    Top level of each root only, and only scenario*.json. Both matter: the roots
+    also hold the scenario folders themselves, and those contain .json files of
+    their own -- trip_distributions.json among them -- which are inputs to a
+    scenario rather than scenarios.
+
+    The .previous.json backups write_scenario leaves behind are excluded too.
+    They match scenario*.json, so they were being offered as scenarios of their
+    own -- a second entry per edited file, holding the values you had just
+    changed, and selecting one would quietly work against the old settings.
+    """
+    found = []
+    for root in SCENARIO_ROOTS:
+        found.extend(sorted(
+            f for f in glob.glob(os.path.join(MODEL_DIR, root, "scenario*.json"))
+            if not f.lower().endswith(".previous.json")))
+    return found
 
 
-def scenario_summary(path):
-    name = os.path.basename(path)
+def _scenario_id(path):
+    """
+    How a scenario is named in the API and the picker: "<root>/<file>.json".
+
+    The bare filename will not do any more. Two roots can hold the same name --
+    copying a shared scenario into scenarios_private to work on it privately is
+    the obvious way to get there -- and a bare name would then be ambiguous.
+    """
+    return os.path.relpath(path, MODEL_DIR).replace(os.sep, "/")
+
+
+def _active_config():
+    """The config the command-line copy currently holds, or None."""
+    try:
+        with open(ACTIVE_COPY, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def scenario_summary(path, active_cfg=None):
+    name = _scenario_id(path)
     try:
         s = load_scenario(path)
     except SystemExit as e:
@@ -51,7 +101,11 @@ def scenario_summary(path):
     return {
         "file": name,
         "ok": True,
-        "active": name == "scenario.json",
+        # Not "this file is scenario.json" any more, because scenario.json is no
+        # longer one of the files listed. It is "this is the scenario the root
+        # copy currently holds", which is the thing that was ever worth knowing:
+        # what a bare `python Simulation/Simulation.py` would run.
+        "active": active_cfg is not None and s.cfg == active_cfg,
         "name": s.name,
         "folder_name": s.folder_name,
         "folder": s.folder,
@@ -64,23 +118,38 @@ def scenario_summary(path):
     }
 
 
-def _newest_mtime(path):
-    """
-    Modification time of a file, or of the newest file inside a directory.
+# The board and Task.is_available ask the same question -- how old is this,
+# really -- so they answer it with the same function rather than two copies that
+# can drift apart.
+_newest_mtime = task_registry.newest_mtime
 
-    A directory's own mtime only tracks entries being added or removed, so a run
-    that rewrites the same 700 agent files in place would leave it unchanged and
-    the artefact would look older than it is.
+
+def served_url(abs_path):
     """
-    if os.path.isfile(path):
-        return os.path.getmtime(path)
-    newest, count = 0.0, 0
-    with os.scandir(path) as entries:
-        for entry in entries:
-            count += 1
-            if entry.is_file():
-                newest = max(newest, entry.stat().st_mtime)
-    return newest or os.path.getmtime(path)
+    The URL this server hands a file out at, or None if nothing serves it.
+
+    Built here rather than in the browser because the mounts are derived from
+    where the data folder actually is, and because a scenario folder called
+    "accra - okada" needs quoting that is easy to get wrong by hand.
+    """
+    for route, directory in data_mounts().items():
+        rel = os.path.relpath(abs_path, directory)
+        if not rel.startswith(".."):
+            return route + "/" + quote(rel.replace(os.sep, "/"))
+    rel = os.path.relpath(abs_path, MODEL_DIR)
+    return "/" + quote(rel.replace(os.sep, "/")) if not rel.startswith("..") else None
+
+
+def _age(seconds):
+    """A rough gap, for saying how far behind a stale artefact is."""
+    seconds = int(seconds)
+    if seconds < 90:
+        return f"{seconds}s"
+    if seconds < 5400:
+        return f"{seconds // 60}m"
+    if seconds < 172800:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
 
 
 def artefact_status(scenario):
@@ -100,7 +169,7 @@ def artefact_status(scenario):
 
     found = {}
     for art in task_registry.ARTEFACTS:
-        path = os.path.join(scenario.folder, art.path.replace("/", os.sep))
+        path = task_registry.scenario_path(scenario, art.path)
         exists = os.path.exists(path)
         required = art.is_required(mode)
         entry = {
@@ -109,6 +178,20 @@ def artefact_status(scenario):
             "produced_by": art.produced_by,
             "depends_on": list(art.depends_on),
         }
+        # Figures written alongside the data, offered only when the figure AND
+        # the data it describes are both on disk. A button that 404s is worse
+        # than no button, and a figure whose artefact is missing is worse still:
+        # it is not this run's figure, it is a leftover from the last one, and
+        # nothing on the row says so. The simulation makes exactly that pair --
+        # station_queues_analysis.png is drawn before the timesteps spreadsheet
+        # is written, so a run that skips the spreadsheet still leaves the PNG.
+        # Shaped like the task previews below, so the panel renders both alike.
+        entry["previews"] = [
+            {"name": os.path.basename(f), "url": served_url(full)}
+            for f, full in ((f, task_registry.scenario_path(scenario, f))
+                            for f in (art.previews if exists else ()))
+            if os.path.exists(full)]
+
         if exists:
             entry["modified"] = int(_newest_mtime(path))
             if os.path.isdir(path):
@@ -131,6 +214,18 @@ def artefact_status(scenario):
         newer = [found[d]["label"] for d in art.depends_on
                  if found.get(d, {}).get("exists")
                  and found[d]["modified"] > entry["modified"]]
+
+        # Written by the same run as something else, but older than it by more
+        # than the tolerance: this one is left over from a previous run. The
+        # dependency check above cannot see that -- re-running the simulation on
+        # unchanged inputs leaves every depends_on older than both files.
+        reference = found.get(art.same_run_as) if art.same_run_as else None
+        if reference and reference.get("exists"):
+            behind = reference["modified"] - entry["modified"]
+            if behind > task_registry.SAME_RUN_TOLERANCE_S:
+                newer.append(f"{reference['label']} "
+                             f"({_age(behind)} newer)")
+
         entry["status"] = "stale" if newer else "ok"
         entry["stale_because"] = newer
 
@@ -139,10 +234,15 @@ def artefact_status(scenario):
 
 @app.get("/api/scenarios")
 def list_scenarios():
-    return {"scenarios": [scenario_summary(p) for p in scenario_files()]}
+    active = _active_config()
+    return {"scenarios": [scenario_summary(p, active) for p in scenario_files()],
+            "roots": list(SCENARIO_ROOTS)}
 
 
-@app.get("/api/scenarios/{name}")
+# ":path" because a scenario is named "<root>/<file>.json" and the slash has to
+# survive routing. The validation in _scenario_path is what keeps that from
+# meaning "any path at all".
+@app.get("/api/scenarios/{name:path}")
 def get_scenario(name: str):
     path = _scenario_path(name)
     s = load_scenario(path)
@@ -161,10 +261,27 @@ def get_scenario(name: str):
         },
         "artefacts": artefact_status(s),
         "stages": task_registry.STAGES,
+        # Which tools have the files they need, for THIS scenario. Answered here
+        # rather than in /api/tools because that endpoint is fetched once at
+        # start-up and knows nothing about which scenario is selected.
+        "tool_available": {t.key: t.is_available(s)
+                           for t in task_registry.TOOLS},
+        # Same question for the tasks, answered here for the same reason:
+        # /api/tasks is fetched once and knows nothing about the selection.
+        "task_available": {t.id: t.is_available(s)
+                           for t in task_registry.TASKS},
+        # Figures a task has already drawn for THIS scenario, so the panel can
+        # link straight to them. Only ones on disk: a button that 404s is worse
+        # than no button.
+        "task_previews": {
+            t.id: [{"name": os.path.basename(f),
+                    "url": served_url(task_registry.scenario_path(s, f))}
+                   for f in t.existing_previews(s)]
+            for t in task_registry.TASKS},
     }
 
 
-@app.put("/api/scenarios/{name}")
+@app.put("/api/scenarios/{name:path}")
 def save_scenario(name: str, payload: dict):
     """
     Merge changes into a scenario file.
@@ -212,10 +329,22 @@ def save_scenario(name: str, payload: dict):
 
 
 def _scenario_path(name):
-    """Resolve a scenario filename, refusing anything outside the Model folder."""
-    if os.path.basename(name) != name:
-        raise HTTPException(400, "scenario must be a bare filename")
-    path = os.path.join(MODEL_DIR, name)
+    """
+    Resolve a scenario id, refusing anything that is not one of the two roots.
+
+    The roots are listed rather than the path merely being checked for "..":
+    this value arrives from a URL, and an allowlist cannot be talked round by a
+    symlink or an encoding trick the way a traversal check can.
+    """
+    parts = [p for p in str(name).replace("\\", "/").split("/") if p]
+    ok = (len(parts) == 2 and parts[0] in SCENARIO_ROOTS
+          and parts[1].lower().endswith(".json")
+          and not parts[1].lower().endswith(".previous.json")
+          and not parts[1].startswith("."))
+    if not ok:
+        raise HTTPException(400, "scenario must be named "
+                            + " or ".join(f"{r}/<file>.json" for r in SCENARIO_ROOTS))
+    path = os.path.join(MODEL_DIR, parts[0], parts[1])
     if not os.path.exists(path):
         raise HTTPException(404, f"no such scenario: {name}")
     return path
@@ -233,11 +362,16 @@ def list_tasks():
         "exists": t.exists, "runnable": task_registry.is_runnable(t),
         "needs_confirmation": task_registry.needs_confirmation(t),
         "irreversible": task_registry.is_irreversible(t),
-    } for t in task_registry.TASKS]}
+        # The dashboard hides what the selected scenario's mode cannot use.
+        # Sent rather than filtered here: this endpoint is fetched once at
+        # start-up, while the scenario picker changes without a reload.
+        "modes": list(t.modes),
+    } for t in task_registry.TASKS],
+        "stages": task_registry.STAGES}
 
 
 @app.get("/api/tasks/{task_id}/impact")
-def task_impact(task_id: str, scenario: str = "scenario.json"):
+def task_impact(task_id: str, scenario: str):
     """
     What running this task would overwrite, with the files as they stand now.
 
@@ -252,7 +386,7 @@ def task_impact(task_id: str, scenario: str = "scenario.json"):
 
     files = []
     for rel in task_registry.OVERWRITES.get(task_id, []):
-        path = os.path.join(s.folder, rel.replace("/", os.sep))
+        path = task_registry.scenario_path(s, rel)
         exists = os.path.exists(path)
         files.append({
             "path": rel,
@@ -275,6 +409,9 @@ def task_impact(task_id: str, scenario: str = "scenario.json"):
 # they are reproducible by running the model, and an accra output folder is
 # 433 MB that would then sit in OneDrive twice.
 COPY_ALWAYS = ["geojson_files", "captured_locations"]
+# Only reached by a scenario still on the old layout, where the results sat
+# inside the scenario folder. One that has an "output_folder" has its results
+# somewhere else entirely, and they are copied separately below.
 COPY_ON_REQUEST = ["output"]
 
 
@@ -295,7 +432,7 @@ def _dir_size(path):
     return total
 
 
-@app.post("/api/scenarios/{name}/copy")
+@app.post("/api/scenarios/{name:path}/copy")
 def copy_scenario(name: str, payload: dict):
     """
     Duplicate a scenario: its folder, and a scenario file pointing at the copy.
@@ -321,22 +458,35 @@ def copy_scenario(name: str, payload: dict):
         raise HTTPException(400, "scenario_file must be a bare filename")
     if not scenario_file.endswith(".json"):
         scenario_file += ".json"
-    dest_scenario = os.path.join(MODEL_DIR, scenario_file)
+    # Beside the original, not in the Model root: a copy of a private scenario
+    # belongs in scenarios_private, and one of a shared scenario in
+    # scenarios_shared. Putting every copy in one place would have decided that
+    # for you, and in the direction that leaks.
+    dest_scenario = os.path.join(os.path.dirname(src_path), scenario_file)
 
     dest_folder = os.path.join(os.path.dirname(src.folder), new_name)
+    # Where the copy's results will go. A scenario with an "output_folder" keeps
+    # its results outside the scenario folder, so the copy needs its own place
+    # beside the original's -- and needs it whether or not the existing results
+    # come along, because a copy left pointing at the original's output folder
+    # would write its next run straight over the original's results.
+    dest_output = (os.path.join(os.path.dirname(src.output_dir), new_name)
+                   if src.output_folder else None)
 
     if os.path.exists(dest_scenario):
         raise HTTPException(409, f"{scenario_file} already exists")
     if os.path.exists(dest_folder):
         raise HTTPException(409, f"Folder already exists: {dest_folder}")
+    if dest_output and os.path.exists(dest_output):
+        raise HTTPException(409, f"Output folder already exists: {dest_output}")
     if not os.path.isdir(src.folder):
         raise HTTPException(404, f"Source folder does not exist: {src.folder}")
 
-    # Confined to the same root the folder browser uses.
-    root = os.path.abspath(BROWSE_ROOT)
-    if not os.path.normcase(os.path.abspath(dest_folder)).startswith(
-            os.path.normcase(root) + os.sep):
-        raise HTTPException(403, "Destination is outside the browsable root")
+    root = os.path.abspath(COPY_ROOT)
+    for target in (dest_folder, dest_output):
+        if target and not os.path.normcase(os.path.abspath(target)).startswith(
+                os.path.normcase(root) + os.sep):
+            raise HTTPException(403, "Destination is outside the browsable root")
 
     wanted = COPY_ALWAYS + (COPY_ON_REQUEST if include_output else [])
     copied, skipped = [], []
@@ -353,95 +503,57 @@ def copy_scenario(name: str, payload: dict):
                 # Loose files alongside the folders are cheap and usually notes.
                 shutil.copy2(entry.path, os.path.join(dest_folder, entry.name))
                 copied.append(entry.name)
+        # Results, when they live outside the scenario folder and were asked
+        # for. Copied last: it is much the largest part, so a failure anywhere
+        # else costs nothing.
+        if dest_output and include_output and os.path.isdir(src.output_dir):
+            shutil.copytree(src.output_dir, dest_output)
+            copied.append(os.path.basename(dest_output) + " (output)")
+        elif dest_output:
+            skipped.append(os.path.basename(src.output_dir) + " (output)")
     except OSError as e:
         # Do not leave a half-copied folder behind for someone to trip over.
         shutil.rmtree(dest_folder, ignore_errors=True)
+        if dest_output:
+            shutil.rmtree(dest_output, ignore_errors=True)
         raise HTTPException(500, f"Copy failed, nothing kept: {e}")
 
     cfg = dict(src.cfg)
     cfg["folder_name"] = _as_relative(dest_folder)
+    if dest_output:
+        cfg["output_folder"] = _as_relative(dest_output)
     write_scenario(dest_scenario, cfg, backup=False)
 
+    size = _dir_size(dest_folder)
+    if dest_output and os.path.isdir(dest_output):
+        size += _dir_size(dest_output)
     return {
-        "scenario_file": scenario_file,
+        # The id the picker selects by, not the bare filename.
+        "scenario_file": _scenario_id(dest_scenario),
         "folder": dest_folder,
         "folder_name": cfg["folder_name"],
+        "output_folder": cfg.get("output_folder"),
         "copied": copied,
         "skipped": skipped,
-        "size_mb": round(_dir_size(dest_folder) / 1e6, 1),
+        "size_mb": round(size / 1e6, 1),
     }
 
 
 # ============================================================
-# FOLDER BROWSER
+# PATHS
 # ============================================================
-# A browser cannot hand a page a filesystem path -- neither <input
-# webkitdirectory> nor showDirectoryPicker() exposes one, by design -- so the
-# folder picker is served from here instead. Browsing is confined to
-# BROWSE_ROOT: the server is loopback-only, but an endpoint that walks the whole
-# disk is still not something to leave lying around.
-BROWSE_ROOT = os.path.dirname(MODEL_DIR)
 
-# Directories that are never a scenario folder and only add noise.
-BROWSE_SKIP = {"venv", "__pycache__", "node_modules", ".git", ".vscode", "cache",
-               "staticfiles", "site-packages"}
+# Where a copied scenario may be created. The server is loopback-only, but a
+# copy is still a write, and one that could land anywhere on the disk is not
+# something to leave possible.
+COPY_ROOT = os.path.dirname(MODEL_DIR)
 
 
 def _as_relative(abs_path):
-    """Path as folder_name wants it: relative to Model/, forward slashes."""
+    """Path as folder_name and output_folder want it: relative to Model/,
+    forward slashes."""
     rel = os.path.relpath(abs_path, MODEL_DIR)
     return rel.replace(os.sep, "/")
-
-
-def _resolve_browse(rel):
-    """Absolute path for a browse request, refusing anything outside the root."""
-    target = os.path.abspath(os.path.join(MODEL_DIR, rel or "."))
-    root = os.path.abspath(BROWSE_ROOT)
-    if os.path.normcase(target) != os.path.normcase(root) and \
-       not os.path.normcase(target).startswith(os.path.normcase(root) + os.sep):
-        raise HTTPException(403, "Outside the browsable root")
-    if not os.path.isdir(target):
-        raise HTTPException(404, f"Not a directory: {target}")
-    return target
-
-
-@app.get("/api/browse")
-def browse(path: str = ""):
-    """
-    Directories under `path`, for the folder picker.
-
-    Entries are flagged as scenario folders when they contain geojson_files,
-    so the one you want is obvious rather than something to recognise by name.
-    """
-    target = _resolve_browse(path)
-    root = os.path.abspath(BROWSE_ROOT)
-
-    entries = []
-    try:
-        for entry in sorted(os.scandir(target), key=lambda e: e.name.lower()):
-            if not entry.is_dir() or entry.name.startswith(".") \
-               or entry.name in BROWSE_SKIP:
-                continue
-            has_inputs = os.path.isdir(os.path.join(entry.path, "geojson_files"))
-            entries.append({
-                "name": entry.name,
-                "path": _as_relative(entry.path),
-                "is_scenario": has_inputs,
-                "has_output": os.path.isdir(os.path.join(entry.path, "output")),
-            })
-    except PermissionError:
-        raise HTTPException(403, f"Cannot read {target}")
-
-    at_root = os.path.normcase(target) == os.path.normcase(root)
-    return {
-        "path": _as_relative(target),
-        "abs": target,
-        "name": os.path.basename(target) or target,
-        "parent": None if at_root else _as_relative(os.path.dirname(target)),
-        "is_scenario": os.path.isdir(os.path.join(target, "geojson_files")),
-        "entries": entries,
-        "root": _as_relative(root),
-    }
 
 
 @app.get("/api/tools")
@@ -457,11 +569,14 @@ def list_tools():
         "groups": task_registry.TOOL_GROUPS,
         "tools": [{
             "label": t.label,
-            "url": "/" + quote(t.path),
+            "url": "/" + quote(t.path) + ("?" + t.query if t.query else ""),
             "description": t.description,
             "group": t.group,
             "accepts_scenario": t.accepts_scenario,
             "exists": t.exists,
+            "modes": list(t.modes),
+            # Keyed per menu entry: two entries can share one path.
+            "key": t.key,
         } for t in task_registry.TOOLS],
     }
 
@@ -489,7 +604,13 @@ def create_job(payload: dict):
             f"'{task.label}' replaces the current results. Resend with "
             '{"confirm": true} to go ahead.')
 
-    path = _scenario_path(payload.get("scenario") or "scenario.json")
+    # Required rather than defaulted: the default used to be the root copy, and
+    # a job that silently ran against a different scenario than the one on
+    # screen is the one mistake this endpoint must not make.
+    scenario_id = payload.get("scenario")
+    if not scenario_id:
+        raise HTTPException(400, "a scenario is required")
+    path = _scenario_path(scenario_id)
     job = manager.submit(task, path)
     return job.to_dict()
 
@@ -555,17 +676,43 @@ def data_mounts():
     return mounts
 
 
+class RevalidatingStaticFiles(StaticFiles):
+    """
+    StaticFiles that makes the browser check before reusing anything cached.
+
+    Starlette sends etag and last-modified but no Cache-Control, which leaves
+    browsers to apply heuristic freshness -- roughly a tenth of the file's age
+    -- and serve from cache without asking. Everything this server hands out is
+    rewritten in place: the dashboard while it is being worked on, and the agent
+    tracks and geojson inputs on every run. A silently stale copy of any of them
+    shows the previous run's answer with no sign that it has done so, which is
+    the most expensive kind of wrong.
+
+    "no-cache" does not mean "do not store" -- the copy is kept and revalidated,
+    so an unchanged file still costs a 304 with no body. Against a server on
+    127.0.0.1 that is not worth optimising away.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 def mount_static(application):
     for route, directory in data_mounts().items():
-        application.mount(route, StaticFiles(directory=directory), name=route.strip("/"))
+        application.mount(route, RevalidatingStaticFiles(directory=directory),
+                          name=route.strip("/"))
 
     web_dir = os.path.join(MODEL_DIR, "web")
     if os.path.isdir(web_dir):
-        application.mount("/app", StaticFiles(directory=web_dir, html=True), name="web")
+        application.mount("/app", RevalidatingStaticFiles(directory=web_dir, html=True),
+                          name="web")
 
     # The Model folder last: it answers everything not claimed above, which is
     # what makes animation.html and the utilities/ tools work unchanged.
-    application.mount("/", StaticFiles(directory=MODEL_DIR, html=True), name="model")
+    application.mount("/", RevalidatingStaticFiles(directory=MODEL_DIR, html=True),
+                      name="model")
 
 
 mount_static(app)

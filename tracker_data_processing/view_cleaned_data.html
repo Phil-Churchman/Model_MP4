@@ -85,6 +85,8 @@
 <div class="container-fluid p-4">
     <h2 class="mb-4">GPS Track & Network Viewer</h2>
 
+    <div id="scenarioStatus" class="mb-2" style="font-size:.85rem;color:#6b7280"></div>
+
     <div class="toolbar">
         <div class="row g-3 align-items-center">
             <div class="col-auto">
@@ -101,6 +103,10 @@
             </div>
             <div class="col-auto d-flex align-items-end mt-auto pt-4">
                 <button class="btn btn-primary" onclick="loadFiles()">Load Data</button>
+            </div>
+            <div class="col-auto d-flex align-items-end mt-auto pt-4">
+                <button class="btn btn-outline-secondary" onclick="loadFromScenario()"
+                        title="Reload the three files from the scenario folder">Reload scenario</button>
             </div>
             <div class="col-auto d-flex align-items-end mt-auto pt-4">
                 <button id="toggleRaw" class="btn btn-outline-danger active" onclick="toggleLayer('raw')">Toggle Raw</button>
@@ -294,6 +300,111 @@ function initMap() {
         }
     });
 }
+
+
+// ---------------- SCENARIO AUTO-LOAD ----------------
+// Which scenario to open. The control panel links here with ?scenario=<file> so
+// the page follows its picker; opened directly there is no parameter and it
+// falls back to scenario.json. Same rule as the other tools.
+function scenarioFile() {
+  const asked = new URLSearchParams(location.search).get("scenario");
+  if (!asked) return "scenario.json";
+  // A scenario id is either a bare scenario*.json at the Model root, or one
+  // inside a folder the dashboard reads scenario files from. It becomes part
+  // of a URL, so anything else is refused here rather than failing later as a
+  // confusing 404. Folders are listed rather than allowed generally: a path
+  // from a query string is not something to follow wherever it points.
+  const ROOTS = ["scenarios_shared", "scenarios_private"];
+  const parts = asked.replace(/\\/g, "/").split("/").filter(Boolean);
+  const name = parts.pop() || "";
+  const folder = parts.join("/");
+  if (!/^scenario[\w.-]*\.json$/i.test(name)
+      || (folder && !ROOTS.includes(folder))) {
+    console.warn(`Ignoring unusable ?scenario=${asked}; using scenario.json`);
+    return "scenario.json";
+  }
+  return folder ? folder + "/" + name : name;
+}
+const SCENARIO_FILE = scenarioFile();
+// This page lives in tracker_data_processing/, so folder_name -- written
+// relative to the Model folder -- resolves against one level up.
+const MODEL_ROOT = new URL("../", location.href);
+const SCENARIO_URL = new URL(SCENARIO_FILE, MODEL_ROOT).href;
+
+async function fetchScenarioCaptureDir(){
+  const res = await fetch(SCENARIO_URL);
+  if(!res.ok) throw new Error(`HTTP ${res.status} reading ${SCENARIO_FILE}`);
+  const scenario = await res.json();
+  if(!scenario.folder_name) throw new Error(`${SCENARIO_FILE} has no folder_name`);
+  return { dir: new URL(scenario.folder_name + "/captured_locations/", MODEL_ROOT),
+           folder: scenario.folder_name };
+}
+
+// XLSX from a URL rather than a File. Same parse as the file input beside it --
+// only the source of the bytes differs.
+async function fetchXlsxRows(url, opts){
+  const res = await fetch(url);
+  if(!res.ok) throw new Error(`HTTP ${res.status}`);
+  const wb = XLSX.read(new Uint8Array(await res.arrayBuffer()),
+                       Object.assign({ type: "array", cellDates: true }, opts || {}));
+  return XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
+}
+
+async function fetchText(url){
+  const res = await fetch(url);
+  if(!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.text();
+}
+
+function setScenarioStatus(text, isError){
+  const el = document.getElementById("scenarioStatus");
+  if(!el) return;
+  el.textContent = text;
+  el.style.color = isError ? "#b3261e" : "#6b7280";
+}
+
+// The same three layers loadFiles() builds, sourced from the scenario folder
+// instead of from the pickers. Each is independent: a capture often has the
+// spreadsheets before it has a matched network, and that is worth seeing.
+async function loadFromScenario(){
+  let where;
+  try {
+    where = await fetchScenarioCaptureDir();
+  } catch (err) {
+    setScenarioStatus(`${SCENARIO_FILE}: ${err.message} -- use the pickers and Load Data`, true);
+    console.warn("Scenario load failed:", err);
+    return;
+  }
+
+  rawSource.clear();
+  cleanSource.clear();
+  roadsSource.clear();
+
+  const loaded = [];
+  // dense:true to match readXlsx() below -- plotTrackOptimized is written
+  // against the row shape that produces.
+  for (const [file, source, label] of [
+        ["device_locations.xlsx", rawSource, "raw"],
+        ["gps_noise_reduced.xlsx", cleanSource, "clean"]]) {
+    try {
+      const rows = await fetchXlsxRows(new URL(file, where.dir).href, { dense: true });
+      plotTrackOptimized(rows, source);
+      loaded.push(`${label} (${rows.length} rows)`);
+    } catch (err) { console.warn(`No ${file}:`, err); }
+  }
+
+  try {
+    parseAndPlotGraphML(await fetchText(new URL("matched_routes.graphml", where.dir).href));
+    loaded.push("network");
+  } catch (err) { console.warn("No matched_routes.graphml:", err); }
+
+  if (loaded.length) fitMap();
+  setScenarioStatus(`${SCENARIO_FILE} - ${where.folder} `
+    + (loaded.length ? `(${loaded.join(", ")})` : "(no capture files found)"),
+    !loaded.length);
+}
+
+document.addEventListener("DOMContentLoaded", loadFromScenario);
 
 async function loadFiles() {
     rawSource.clear();

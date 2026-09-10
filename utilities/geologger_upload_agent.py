@@ -1,7 +1,7 @@
 """
 Geo-logger upload agent.
 
-Replays the simulation trips in <folder_name>/output/output_trips_time_queued as if
+Replays the simulation trips in <output_folder>/output_trips_time_queued as if
 each simulated vehicle were carrying a GPS logger that posts its track to the
 Geo_logger API (loggerapp.views.receive_location, routed at /api/upload/).
 

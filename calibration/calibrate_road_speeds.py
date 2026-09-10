@@ -6,7 +6,7 @@ Reads the per-trip analysis written by Simulation/captured_trips_to_geojson.py
 the routed times agree as closely as possible with the durations actually
 recorded. Writes one CSV of fitted speeds to the scenario's output folder.
 
-    python utilities/calibrate_road_speeds.py --scenario scenario_nairobi.json
+    python calibration/calibrate_road_speeds.py --scenario scenarios_private/scenario_nairobi.json
 
 
 ================================================================================

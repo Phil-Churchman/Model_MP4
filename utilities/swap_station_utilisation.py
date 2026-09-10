@@ -13,7 +13,7 @@ from tqdm import tqdm
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scenario_config import scenario_from_cli
+from scenario_config import scenario_from_cli, writable_path
 
 # ==============================
 # SETTINGS
@@ -32,6 +32,18 @@ def main():
     SWAP_STATIONS_FILE = os.path.join(INPUT_DIR, "swap_stations.geojson")
     CSV_OUTPUT = os.path.join(OUTPUT_DIR, "swap_station_arrivals.csv")
     FIG_OUTPUT = os.path.join(OUTPUT_DIR, "swap_station_arrivals_grid.png")
+
+    # The tracks are the whole input. Without them this used to read zero
+    # arrivals, draw a grid of empty axes and save it as a result -- and only
+    # avoided doing so because writing into a missing output folder happened to
+    # raise. That is not a guard, it is a coincidence, so it is stated here.
+    if not os.path.isdir(OUTPUT_PER_AGENT_TIME_DIR) or not [
+            f for f in os.listdir(OUTPUT_PER_AGENT_TIME_DIR)
+            if f.endswith("_time.geojson")]:
+        raise SystemExit(
+            f"No agent tracks in {OUTPUT_PER_AGENT_TIME_DIR}.\n"
+            f"Run the simulation first -- the arrival profile is counted from "
+            f"the tracks it writes.")
 
     d_start, d_end = scenario["start_time"], scenario["end_time"]
     START_TIME = datetime(d_start[0], d_start[1], d_start[2], d_start[3], d_start[4], d_start[5])
@@ -93,7 +105,7 @@ def main():
                     if 0 <= bin_idx < len(df):
                         df.at[bins[bin_idx], nearest_id] += 1
 
-    df.to_csv(CSV_OUTPUT)
+    df.to_csv(writable_path(CSV_OUTPUT))
 
     # ==============================
     # PLOT GRID
@@ -141,7 +153,7 @@ def main():
     fig.text(0.02, 0.5, 'Number of Taxi Arrivals', va='center', rotation='vertical', fontsize=12)
 
     plt.tight_layout(rect=[0.05, 0.03, 1, 0.93])
-    plt.savefig(FIG_OUTPUT, dpi=300)
+    plt.savefig(writable_path(FIG_OUTPUT), dpi=300)
     plt.show()
 
 

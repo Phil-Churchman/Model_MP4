@@ -31,8 +31,22 @@ def collect_swap_records(input_path):
                 geometry_type = feature.get("geometry", {}).get("type")
                 properties = feature.get("properties", {})
 
-                # Check for Point features with type "to_swap"
-                if geometry_type == "Point" and properties.get("type") == "to_swap":
+                # The stop at the station, not the drive to it. Both can be
+                # Points with type "to_swap": when an agent is already standing
+                # on the station node the drive collapses to zero length, and
+                # the trip feature is written out as a Point like the wait that
+                # follows it. Matching on geometry type alone counted that
+                # agent's battery twice -- the pair shows up as a ten-second
+                # record with no facility_id immediately before the real one,
+                # carrying the same total_distance_m.
+                #
+                # segment_times is the discriminator rather than facility_id:
+                # every trip feature carries it (empty when routing failed) and
+                # no stop feature does, so this holds even for a run written
+                # before stops recorded which station they were at.
+                is_stop = "segment_times" not in properties
+                if (geometry_type == "Point" and is_stop
+                        and properties.get("type") == "to_swap"):
                     record = {
                         "agent_id": properties.get("agent"),
                         "swap_station": properties.get("facility_id"),
@@ -50,6 +64,24 @@ def main():
     input_path = scenario.trips_time_dir
     output_path = scenario.output_dir
 
+    # The tracks are the whole input. collect_swap_records shrugs at a missing
+    # folder and returns nothing, which used to become a spreadsheet of zero
+    # rows -- indistinguishable, once on disk, from a run in which no vehicle
+    # ever swapped, and read as exactly that by the charging analysis
+    # downstream. An empty tracks folder is the case that actually happens: an
+    # interrupted run leaves the folder behind with nothing in it, and the
+    # board offers this task because the folder exists.
+    #
+    # Zero swap records from tracks that ARE there is left alone: that is a
+    # real result about a real run, not an absent input.
+    if not os.path.isdir(input_path) or not [
+            f for f in os.listdir(input_path)
+            if f.endswith(".json") or f.endswith(".geojson")]:
+        raise SystemExit(
+            f"No agent tracks in {input_path}.\n"
+            f"Run the simulation first -- swap visits are read out of the "
+            f"tracks it writes.")
+
     swap_records = collect_swap_records(input_path)
 
     # Create DataFrame and export to Excel
@@ -57,7 +89,7 @@ def main():
     df_swaps = pd.DataFrame(swap_records)
 
     os.makedirs(output_path, exist_ok=True)
-    excel_output_path = os.path.join(output_path, "swap_station_visits.xlsx")
+    excel_output_path = os.path.join(output_path, "swap_station_activity.xlsx")
     df_swaps.to_excel(excel_output_path, index=False)
 
     print(f"Done! Exported {len(df_swaps)} records to {excel_output_path}")

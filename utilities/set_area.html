@@ -41,6 +41,9 @@
     </div>
 
     <button id="exportPolygonBtn" class="btn btn-primary btn-sm" disabled>Export Area</button>
+    <button id="reloadAreaBtn" class="btn btn-outline-secondary btn-sm"
+            title="Discard changes and reload area.geojson from the scenario folder">Reload</button>
+    <span id="scenarioLabel" class="ms-2 text-muted small"></span>
     <span id="progress"></span>
 </div>
 
@@ -170,22 +173,111 @@ function createAcceptCancelOverlay(position) {
 }
 
 /** * 3. SEARCH & IMPORT LOGIC */
+// Split from the file input so the scenario auto-load below runs the same code
+// rather than a second copy of it.
+function loadAreaGeoJSON(geojson){
+    const features = new ol.format.GeoJSON().readFeatures(geojson, { featureProjection:'EPSG:3857' });
+    vectorSource.clear();
+    vectorSource.addFeatures(features);
+    if(features.length) map.getView().fit(vectorSource.getExtent(), { padding:[40,40,40,40], duration:600 });
+    updateExportButtons();
+    return features.length;
+}
+
 document.getElementById('fileInput').addEventListener('change', e => {
     const file = e.target.files[0];
     if(!file) return;
     const reader = new FileReader();
     reader.onload = ev => {
         try {
-            const geojson = JSON.parse(ev.target.result);
-            const features = new ol.format.GeoJSON().readFeatures(geojson, { featureProjection:'EPSG:3857' });
-            vectorSource.clear();
-            vectorSource.addFeatures(features);
-            if(features.length) map.getView().fit(vectorSource.getExtent(), { padding:[40,40,40,40], duration:600 });
-            updateExportButtons();
+            loadAreaGeoJSON(JSON.parse(ev.target.result));
+            setScenarioLabel(`area: ${file.name}`);
         } catch(err) { alert("Invalid GeoJSON file."); }
     };
     reader.readAsText(file);
 });
+
+/** * 3b. SCENARIO AUTO-LOAD */
+// Which scenario to open. The control panel links here with ?scenario=<file> so
+// the page follows its picker; opened directly there is no parameter and it
+// falls back to scenario.json. Same rule as the other editors and animation.html.
+function scenarioFile() {
+  const asked = new URLSearchParams(location.search).get("scenario");
+  if (!asked) return "scenario.json";
+  // A scenario id is either a bare scenario*.json at the Model root, or one
+  // inside a folder the dashboard reads scenario files from. It becomes part
+  // of a URL, so anything else is refused here rather than failing later as a
+  // confusing 404. Folders are listed rather than allowed generally: a path
+  // from a query string is not something to follow wherever it points.
+  const ROOTS = ["scenarios_shared", "scenarios_private"];
+  const parts = asked.replace(/\\/g, "/").split("/").filter(Boolean);
+  const name = parts.pop() || "";
+  const folder = parts.join("/");
+  if (!/^scenario[\w.-]*\.json$/i.test(name)
+      || (folder && !ROOTS.includes(folder))) {
+    console.warn(`Ignoring unusable ?scenario=${asked}; using scenario.json`);
+    return "scenario.json";
+  }
+  return folder ? folder + "/" + name : name;
+}
+const SCENARIO_FILE = scenarioFile();
+// This page lives in utilities/, so folder_name -- written relative to the
+// Model folder -- resolves against one level up, not against here.
+const MODEL_ROOT = new URL("../", location.href);
+const SCENARIO_URL = new URL(SCENARIO_FILE, MODEL_ROOT).href;
+
+async function fetchJSON(url){
+    const res = await fetch(url);
+    if(!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+    return res.json();
+}
+
+function setScenarioLabel(text, isError){
+    const el = document.getElementById('scenarioLabel');
+    if(!el) return;
+    el.textContent = text;
+    el.classList.toggle('text-danger', !!isError);
+    el.classList.toggle('text-muted', !isError);
+}
+
+async function loadFromScenario(){
+    let scenario;
+    try {
+        scenario = await fetchJSON(SCENARIO_URL);
+    } catch(err){
+        // Opened straight off the filesystem rather than through a server:
+        // fetch cannot read file:// URLs. Import and Search still work, so this
+        // is a note rather than an error dialog.
+        setScenarioLabel(`${SCENARIO_FILE} could not be read - use Import`, true);
+        console.warn("Scenario load failed:", err);
+        return;
+    }
+    const folder = scenario.folder_name;
+    if(!folder){
+        setScenarioLabel(`${SCENARIO_FILE} has no folder_name`, true);
+        return;
+    }
+    const AREA_URL = new URL(folder + "/geojson_files/area.geojson", MODEL_ROOT).href;
+    try {
+        const n = loadAreaGeoJSON(await fetchJSON(AREA_URL));
+        setScenarioLabel(`${SCENARIO_FILE} - ${folder} (${n} feature${n === 1 ? "" : "s"})`);
+    } catch(err){
+        // No area yet is the normal state for a new scenario -- this tool is how
+        // you draw the first one -- so it is reported, not treated as a failure.
+        setScenarioLabel(`${SCENARIO_FILE} - ${folder} (no area.geojson yet)`);
+        console.warn("No area.geojson:", err);
+    }
+}
+
+document.getElementById('reloadAreaBtn').addEventListener('click', ()=>{
+    if(vectorSource.getFeatures().length &&
+       !confirm("Reload from the scenario folder? Unsaved changes will be lost.")) return;
+    vectorSource.clear();
+    updateExportButtons();
+    loadFromScenario();
+});
+
+loadFromScenario();
 
 let relations = [];
 const progress = document.getElementById('progress');

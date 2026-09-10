@@ -37,6 +37,9 @@ html, body {
   
   <button id="exportFacilitiesBtn" class="btn btn-primary btn-sm">Export Facilities</button>
   <button id="addFacilityBtn" class="btn btn-outline-success btn-sm">Add facility</button>
+  <button id="reloadScenarioBtn" class="btn btn-outline-secondary btn-sm"
+          title="Discard changes and reload from the scenario folder">Reload</button>
+  <span id="scenarioLabel" class="ms-2 text-muted small"></span>
   <span id="progress"></span>
 </div>
 
@@ -276,98 +279,215 @@ modifyFacility.on('modifyend', e=>{
 
 // ---------- IMPORT & EXPORT SECTION ----------
 
+// The body of each importer is split out from its file-input handler so the
+// scenario auto-load below drives the same code path. What only makes sense for
+// a hand-picked file -- the overwrite confirmation, and clearing the input so
+// the same file can be chosen twice -- is passed in rather than assumed.
+function loadAreaGeoJSON(geojson, { confirmReplace = true } = {}){
+  const features = new ol.format.GeoJSON().readFeatures(
+    geojson, { featureProjection:'EPSG:3857' }
+  );
+  if(confirmReplace && vectorSource.getFeatures().length &&
+     !confirm("Replace existing polygon?")) return false;
+
+  vectorSource.clear();
+  vectorSource.addFeatures(features);
+
+  if(features.length)
+    map.getView().fit(vectorSource.getExtent(),
+      { padding:[40,40,40,40], duration:600 });
+  return true;
+}
+
 document.getElementById('fileInput').addEventListener('change', e=>{
   const file = e.target.files[0];
   if(!file) return;
   const reader = new FileReader();
   reader.onload = ev=>{
     try{
-      const geojson = JSON.parse(ev.target.result);
-      const features = new ol.format.GeoJSON().readFeatures(
-        geojson, { featureProjection:'EPSG:3857' }
-      );
-      if(vectorSource.getFeatures().length &&
-         !confirm("Replace existing polygon?")) return;
-
-      vectorSource.clear();
-      vectorSource.addFeatures(features);
-
-      if(features.length)
-        map.getView().fit(vectorSource.getExtent(),
-          { padding:[40,40,40,40], duration:600 });
-
-      e.target.value = null;
+      if(loadAreaGeoJSON(JSON.parse(ev.target.result))) e.target.value = null;
     } catch(err){ alert("Invalid GeoJSON"); }
   };
   reader.readAsText(file);
 });
 
+function loadFacilitiesGeoJSON(geojson, { confirmReplace = true, fit = true } = {}){
+  let features = new ol.format.GeoJSON().readFeatures(
+    geojson, { featureProjection:'EPSG:3857' }
+  );
+  features = features.filter(f => f.getGeometry().getType()==='Point');
+
+  if(!features.length){ alert("No point features found."); return false; }
+
+  if(facilitySource.getFeatures().length>0){
+    if(confirmReplace &&
+       !confirm("Existing facilities will be deleted. Continue?")) return false;
+    facilitySource.clear();
+  }
+
+  let idField=null;
+  for(const key in features[0].getProperties()){
+    if(key!=='geometry' && /^id$|_id|id_/i.test(key)){ idField=key; break; }
+  }
+  if(!idField) idField='facility_id';
+
+  const originalFields =
+    Object.keys(features[0].getProperties()).filter(k=>k!=='geometry');
+
+  facilityIdField=idField;
+  facilityOriginalFields=originalFields.filter(f=>f!==idField);
+
+  features.forEach(f=>{
+    f.set('___originalFields', originalFields);
+    f.set('___idField', idField);
+  });
+
+  const maxId=Math.max(...features.map(f=>parseInt(f.get(idField))||0));
+  nextFacilityId=maxId+1;
+
+  facilitySource.addFeatures(features);
+  if(fit) map.getView().fit(facilitySource.getExtent(),
+    { padding:[40,40,40,40], duration:600 });
+  return true;
+}
+
 document.getElementById('facilityInput').addEventListener('change', e=>{
   const file = e.target.files[0];
   if(!file) return;
-  lastImportedFacilityFilename = file.name;  // <-- save filename
+  const previous = lastImportedFacilityFilename;
+  lastImportedFacilityFilename = file.name;   // Export suggests this name back
   const reader = new FileReader();
-
   reader.onload = ev=>{
     try{
-      const geojson = JSON.parse(ev.target.result);
-      let features = new ol.format.GeoJSON().readFeatures(
-        geojson, { featureProjection:'EPSG:3857' }
-      );
-
-      features = features.filter(f =>
-        f.getGeometry().getType()==='Point');
-
-      if(!features.length){
-        alert("No point features found.");
-        return;
+      if(loadFacilitiesGeoJSON(JSON.parse(ev.target.result))){
+        setScenarioLabel(`facilities: ${file.name}`);
+        e.target.value=null;
+      } else {
+        lastImportedFacilityFilename = previous;
       }
-
-      if(facilitySource.getFeatures().length>0){
-        if(!confirm("Existing facilities will be deleted. Continue?")) return;
-        facilitySource.clear();
-      }
-
-      let idField=null;
-      for(const key in features[0].getProperties()){
-        if(key!=='geometry' && /^id$|_id|id_/i.test(key)){
-          idField=key; break;
-        }
-      }
-      if(!idField) idField='facility_id';
-
-      const originalFields =
-        Object.keys(features[0].getProperties())
-          .filter(k=>k!=='geometry');
-
-      facilityIdField=idField;
-      facilityOriginalFields=
-        originalFields.filter(f=>f!==idField);
-
-      features.forEach(f=>{
-        f.set('___originalFields', originalFields);
-        f.set('___idField', idField);
-      });
-
-      const maxId=Math.max(...features.map(
-        f=>parseInt(f.get(idField))||0));
-
-      nextFacilityId=maxId+1;
-
-      facilitySource.addFeatures(features);
-
-      map.getView().fit(facilitySource.getExtent(),
-        { padding:[40,40,40,40], duration:600 });
-
-      e.target.value=null;
-
     } catch(err){
+      lastImportedFacilityFilename = previous;
       alert("Invalid GeoJSON");
       console.error(err);
     }
   };
   reader.readAsText(file);
 });
+
+// ---------------- SCENARIO AUTO-LOAD ----------------
+// Which scenario to open. The control panel links here with ?scenario=<file> so
+// the page follows its picker; opened directly there is no parameter and it
+// falls back to scenario.json. Same rule as the other editors.
+function scenarioFile() {
+  const asked = new URLSearchParams(location.search).get("scenario");
+  if (!asked) return "scenario.json";
+  // A scenario id is either a bare scenario*.json at the Model root, or one
+  // inside a folder the dashboard reads scenario files from. It becomes part
+  // of a URL, so anything else is refused here rather than failing later as a
+  // confusing 404. Folders are listed rather than allowed generally: a path
+  // from a query string is not something to follow wherever it points.
+  const ROOTS = ["scenarios_shared", "scenarios_private"];
+  const parts = asked.replace(/\\/g, "/").split("/").filter(Boolean);
+  const name = parts.pop() || "";
+  const folder = parts.join("/");
+  if (!/^scenario[\w.-]*\.json$/i.test(name)
+      || (folder && !ROOTS.includes(folder))) {
+    console.warn(`Ignoring unusable ?scenario=${asked}; using scenario.json`);
+    return "scenario.json";
+  }
+  return folder ? folder + "/" + name : name;
+}
+const SCENARIO_FILE = scenarioFile();
+// This page lives in utilities/, so folder_name -- written relative to the
+// Model folder -- resolves against one level up, not against here.
+const MODEL_ROOT = new URL("../", location.href);
+const SCENARIO_URL = new URL(SCENARIO_FILE, MODEL_ROOT).href;
+const FACILITY_FILE = facilityFile();
+
+// Which file in geojson_files/ this editor is opened on. The panel has two
+// entries pointing here -- stations and taxi ranks -- distinguished only by
+// this parameter, so the page is the same code in both.
+function facilityFile(){
+  const asked = new URLSearchParams(location.search).get("facilities");
+  if(!asked) return "swap_stations.geojson";
+  // Bare filename only, same reasoning as ?scenario=: it becomes part of a URL.
+  const name = asked.split(/[\\/]/).pop();
+  if(!/^[\w.-]+\.geojson$/i.test(name)){
+    console.warn(`Ignoring unusable ?facilities=${asked}; using swap_stations.geojson`);
+    return "swap_stations.geojson";
+  }
+  return name;
+}
+
+async function fetchJSON(url){
+  const res = await fetch(url);
+  if(!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+function setScenarioLabel(text, isError){
+  const el = document.getElementById('scenarioLabel');
+  if(!el) return;
+  el.textContent = text;
+  el.classList.toggle('text-danger', !!isError);
+  el.classList.toggle('text-muted', !isError);
+}
+
+document.title = FACILITY_FILE === "taxi_ranks.geojson"
+  ? "Taxi Ranks Editor" : "Stations Editor";
+
+async function loadFromScenario(){
+  let scenario;
+  try{
+    scenario = await fetchJSON(SCENARIO_URL);
+  } catch(err){
+    // Opened straight off the filesystem rather than through a server: fetch
+    // cannot read file:// URLs. Both Import buttons still work, so this is a
+    // note rather than an error dialog.
+    setScenarioLabel(`${SCENARIO_FILE} could not be read - use Import`, true);
+    console.warn("Scenario load failed:", err);
+    return;
+  }
+  const folder = scenario.folder_name;
+  if(!folder){
+    setScenarioLabel(`${SCENARIO_FILE} has no folder_name`, true);
+    return;
+  }
+  const INPUT_DIR = new URL(folder + "/geojson_files/", MODEL_ROOT);
+
+  // Loaded independently: an area is often drawn before any stations exist, and
+  // that is the normal state to open this in, so a missing facilities file must
+  // not stop the boundary appearing.
+  const loaded = [];
+  try{
+    if(loadAreaGeoJSON(await fetchJSON(new URL("area.geojson", INPUT_DIR).href),
+                       {confirmReplace:false})) loaded.push("area");
+  } catch(err){ console.warn("No area.geojson:", err); }
+
+  try{
+    // fit:false when the area already framed the map -- it is the wider of the two.
+    if(loadFacilitiesGeoJSON(await fetchJSON(new URL(FACILITY_FILE, INPUT_DIR).href),
+                             {confirmReplace:false, fit:!loaded.length})){
+      // So Export offers to write back over the file this came from, rather
+      // than the generic facilities.geojson.
+      lastImportedFacilityFilename = FACILITY_FILE;
+      loaded.push(FACILITY_FILE);
+    }
+  } catch(err){ console.warn(`No ${FACILITY_FILE}:`, err); }
+
+  setScenarioLabel(`${SCENARIO_FILE} - ${folder} `
+    + (loaded.length ? `(${loaded.join(" + ")})` : "(nothing found)"),
+    !loaded.length);
+}
+
+document.getElementById('reloadScenarioBtn').addEventListener('click', ()=>{
+  if(facilitySource.getFeatures().length &&
+     !confirm("Reload from the scenario folder? Unsaved edits will be lost.")) return;
+  facilitySource.clear(); vectorSource.clear();
+  loadFromScenario();
+});
+
+loadFromScenario();
 
 document.getElementById('exportFacilitiesBtn')
 .addEventListener('click', async ()=>{

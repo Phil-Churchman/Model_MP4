@@ -113,7 +113,29 @@ class Scenario:
         return os.path.join(self.folder, "geojson_files")
 
     @property
+    def output_folder(self):
+        """The scenario's "output_folder" as written, or None for the old layout."""
+        value = self.cfg.get("output_folder")
+        return value if value and str(value).strip() else None
+
+    @property
     def output_dir(self):
+        """
+        Where results are written, absolute.
+
+        Results used to live inside the scenario folder, at <folder>/output.
+        That put inputs you edit and outputs a run replaces in the same tree,
+        so a scenario could not be shared without dragging several hundred MB
+        of results along with it. "output_folder" separates them: it is a path
+        of its own, resolved like folder_name is, and it points wherever the
+        scenario says.
+
+        A file without the key keeps resolving exactly as it always did, so
+        nothing has to be migrated for an old scenario to keep running.
+        """
+        out = self.output_folder
+        if out:
+            return os.path.normpath(os.path.join(self.data_root, out))
         return os.path.join(self.folder, "output")
 
     @property
@@ -400,7 +422,14 @@ def road_speeds_ms(speeds_km_h):
 # still honoured when "simulation_mode" is absent, so scenario files that were
 # never migrated keep selecting the mode they always did.
 HAIL_RANK, DEMAND_MODEL_MODE, DISTRIBUTION = "hail_rank", "demand_model", "distribution"
-SIMULATION_MODES = (HAIL_RANK, DEMAND_MODEL_MODE, DISTRIBUTION)
+# Not a way of running the fleet: it marks a scenario used to fit parameters
+# against captured GPS data. Simulation.py refuses it rather than falling through
+# to one of the others, because the mode name would then say nothing about what
+# actually ran.
+CALIBRATION = "calibration"
+SIMULATION_MODES = (HAIL_RANK, DEMAND_MODEL_MODE, DISTRIBUTION, CALIBRATION)
+# The subset Simulation.py can actually run.
+RUNNABLE_MODES = (HAIL_RANK, DEMAND_MODEL_MODE, DISTRIBUTION)
 SIMULATION_MODE_KEY = "simulation_mode"
 
 SIMULATION_MODE_HELP = {
@@ -410,6 +439,9 @@ SIMULATION_MODE_HELP = {
                        "then allocated to the nearest idle agent.",
     DISTRIBUTION: "Agents work a fare-wait / pickup / passenger cycle, with trip "
                   "distances and fare waits drawn from measured distributions.",
+    CALIBRATION: "Not a fleet simulation. Marks a scenario used to fit road "
+                 "speeds, trip distributions and the deviation factor against "
+                 "captured GPS data.",
 }
 
 

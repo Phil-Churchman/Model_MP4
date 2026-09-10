@@ -2,12 +2,12 @@
 Compare what a distribution-mode run actually produced against what it was asked
 to produce.
 
-Reads the agent tracks from <folder_name>/output/output_trips_time_queued and
+Reads the agent tracks from <output_folder>/output_trips_time_queued and
 the target distributions from trip_distributions.json, and plots the two against
 each other -- trip distance and fare wait, as both per-bin share and cumulative
 percentage. Writes a PNG and a CSV of the same numbers.
 
-    python calibration/compare_trip_distributions.py --scenario scenario_nairobi.json
+    python calibration/compare_trip_distributions.py --scenario scenarios_private/scenario_nairobi.json
 
 The simulation does not sample the target directly. It draws a distance BAND and
 then looks for a road node that far away in a straight line, which can fail, and

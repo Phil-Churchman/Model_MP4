@@ -186,14 +186,21 @@ const stationModal = new bootstrap.Modal(document.getElementById('stationModal')
 function scenarioFile() {
   const asked = new URLSearchParams(location.search).get('scenario');
   if (!asked) return 'scenario.json';
-  // Bare filename only. This value becomes part of a URL, and a stray path
-  // would fail as a confusing 404 rather than as a clear refusal.
-  const name = asked.split(/[\\/]/).pop();
-  if (!/^scenario[\w.-]*\.json$/i.test(name)) {
+  // A scenario id is either a bare scenario*.json at the Model root, or one
+  // inside a folder the dashboard reads scenario files from. It becomes part
+  // of a URL, so anything else is refused here rather than failing later as a
+  // confusing 404. Folders are listed rather than allowed generally: a path
+  // from a query string is not something to follow wherever it points.
+  const ROOTS = ['scenarios_shared', 'scenarios_private'];
+  const parts = asked.replace(/\\/g, '/').split('/').filter(Boolean);
+  const name = parts.pop() || '';
+  const folder = parts.join('/');
+  if (!/^scenario[\w.-]*\.json$/i.test(name)
+      || (folder && !ROOTS.includes(folder))) {
     console.warn(`Ignoring unusable ?scenario=${asked}; using scenario.json`);
     return 'scenario.json';
   }
-  return name;
+  return folder ? folder + '/' + name : name;
 }
 const SCENARIO_FILE = scenarioFile();
 
@@ -208,9 +215,14 @@ async function autoLoadData() {
     if (!folderName) throw new Error(`folder_name not found in ${SCENARIO_FILE}`);
     document.title = `Swap Stations - ${folderName}`;
 
+    // Results no longer live inside the scenario folder: "output_folder" is a
+    // path of its own, written the same way folder_name is. A scenario without
+    // the key is the old layout, where they sat at <folder>/output.
+    const outputFolder = scenarioData.output_folder || `${folderName}/output`;
+
     const areaPath = `../${folderName}/geojson_files/area.geojson`;
     const stationsPath = `../${folderName}/geojson_files/swap_stations.geojson`;
-    const xlsxPath = `../${folderName}/output/swap_station_timesteps.xlsx`;
+    const xlsxPath = `../${outputFolder}/swap_station_timesteps.xlsx`;
 
     // 1. Load Area GeoJSON
     try {

@@ -10,7 +10,7 @@ distributions that Simulation.py samples from when simulation_mode is
     distance_distribution   how far a trip goes, by road
     wait_distribution       how long a vehicle waits between fares
 
-    python calibration/build_trip_distributions.py --scenario scenario_nairobi.json
+    python calibration/build_trip_distributions.py --scenario scenarios_private/scenario_nairobi.json
 
 
 ================================================================================

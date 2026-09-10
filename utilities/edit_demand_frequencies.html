@@ -33,12 +33,14 @@
 
     <div class="card p-3 mb-4">
         <div class="d-flex flex-wrap align-items-center gap-2">
-            <button class="btn btn-outline-primary" onclick="document.getElementById('geoInput').click()">1. Import GeoJSON</button>
+            <button class="btn btn-outline-primary" onclick="document.getElementById('geoInput').click()"
+                    title="Replace the demand points loaded from the scenario">Demand points file</button>
             <input type="file" id="geoInput" accept=".geojson,.json" hidden>
             
             <div class="vr mx-2"></div>
 
-            <button class="btn btn-outline-secondary" id="openFileBtn" onclick="document.getElementById('configInput').click()">2: Open Config File</button>
+            <button class="btn btn-outline-secondary" id="openFileBtn" onclick="document.getElementById('configInput').click()"
+                    title="Open the frequencies file directly, so Save writes straight back to it">Demand frequencies file</button>
             <input type="file" id="configInput" accept=".geojson,.json" hidden>
             <button class="btn btn-success" id="saveFileBtn">Save Config</button>
             <button class="btn btn-outline-danger" id="saveAsBtn">Save As...</button>
@@ -49,12 +51,15 @@
             <div id="categoryBadgeContainer"></div>
             <div id="fileStatus" class="text-secondary italic">No file linked</div>
         </div>
+        <div class="d-flex justify-content-end">
+            <div id="scenarioStatus" class="text-secondary small"></div>
+        </div>
     </div>
 
     <div class="card p-3">
         <div class="text-center py-5 text-muted" id="emptyState">
             <h5>No combinations defined.</h5>
-            <p>Import a GeoJSON file first to see available categories.</p>
+            <p>Load a demand points file to see the available categories.</p>
         </div>
         
         <div id="combinationsList"></div>
@@ -121,6 +126,7 @@
     document.addEventListener('DOMContentLoaded', () => {
         comboModal = new bootstrap.Modal(document.getElementById('comboModal'));
         initInputs();
+        loadFromScenario();
     });
 
     function initInputs() {
@@ -134,6 +140,97 @@
         days.forEach((day, i) => {
             wContainer.innerHTML += `<div><label>${day}</label><input type="number" step="0.1" min="0" value="1" class="form-control freq-input day-val" data-idx="${i}"></div>`;
         });
+    }
+
+    // --- SCENARIO AUTO-LOAD ---
+    // Which scenario to open. The control panel links here with ?scenario=<file>
+    // so the page follows its picker; opened directly there is no parameter and
+    // it falls back to scenario.json. Same rule as animation.html and the demand
+    // points editor, so all three agree on which scenario is current.
+    function scenarioFile() {
+      const asked = new URLSearchParams(location.search).get("scenario");
+      if (!asked) return "scenario.json";
+      // A scenario id is either a bare scenario*.json at the Model root, or one
+      // inside a folder the dashboard reads scenario files from. It becomes part
+      // of a URL, so anything else is refused here rather than failing later as a
+      // confusing 404. Folders are listed rather than allowed generally: a path
+      // from a query string is not something to follow wherever it points.
+      const ROOTS = ["scenarios_shared", "scenarios_private"];
+      const parts = asked.replace(/\\/g, "/").split("/").filter(Boolean);
+      const name = parts.pop() || "";
+      const folder = parts.join("/");
+      if (!/^scenario[\w.-]*\.json$/i.test(name)
+          || (folder && !ROOTS.includes(folder))) {
+        console.warn(`Ignoring unusable ?scenario=${asked}; using scenario.json`);
+        return "scenario.json";
+      }
+      return folder ? folder + "/" + name : name;
+    }
+    const SCENARIO_FILE = scenarioFile();
+    // This page lives in utilities/, so folder_name -- written relative to the
+    // Model folder -- resolves against one level up, not against here.
+    const MODEL_ROOT = new URL("../", location.href);
+    const SCENARIO_URL = new URL(SCENARIO_FILE, MODEL_ROOT).href;
+
+    async function fetchJSON(url) {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+        return res.json();
+    }
+
+    function setScenarioStatus(text, isError) {
+        const el = document.getElementById('scenarioStatus');
+        if (!el) return;
+        el.textContent = text;
+        el.classList.toggle('text-danger', !!isError);
+        el.classList.toggle('text-secondary', !isError);
+    }
+
+    async function loadFromScenario() {
+        let scenario;
+        try {
+            scenario = await fetchJSON(SCENARIO_URL);
+        } catch (err) {
+            // Opened straight off the filesystem rather than through a server:
+            // fetch cannot read file:// URLs. Both file buttons still work, so
+            // this is a note rather than an error dialog.
+            setScenarioStatus(`${SCENARIO_FILE} could not be read -- use the file buttons`, true);
+            console.warn("Scenario load failed:", err);
+            return;
+        }
+        const folder = scenario.folder_name;
+        if (!folder) {
+            setScenarioStatus(`${SCENARIO_FILE} has no folder_name`, true);
+            return;
+        }
+        const INPUT_DIR = new URL(folder + "/geojson_files/", MODEL_ROOT);
+
+        // Fetched independently: a scenario often has demand points before it
+        // has any frequencies, and that is the normal state to start defining
+        // them in -- so a missing frequencies file must not stop the categories
+        // loading, which is what the editor needs before it can do anything.
+        const loaded = [];
+        try {
+            const n = applyDemandPoints(await fetchJSON(new URL("demand_points.geojson", INPUT_DIR).href));
+            if (n) loaded.push(`${n} categories`);
+        } catch (err) { console.warn("No demand_points.geojson:", err); }
+
+        try {
+            const data = await fetchJSON(new URL("demand_frequencies.json", INPUT_DIR).href);
+            if (!Array.isArray(data)) throw new Error("expected a JSON array of combinations");
+            combinations = data;
+            renderList();
+            loaded.push(`${data.length} combinations`);
+            // Deliberately NOT setting fileHandle: this came over HTTP, and the
+            // File System Access API cannot write back to it. Saving will ask
+            // where to put the file, so the status says where it came from.
+            document.getElementById('fileStatus').textContent =
+                "Loaded from scenario -- Save will ask for a location";
+        } catch (err) { console.warn("No demand_frequencies.json:", err); }
+
+        setScenarioStatus(
+            `${SCENARIO_FILE} - ${folder}` + (loaded.length ? ` (${loaded.join(", ")})` : " (nothing found)"),
+            !loaded.length);
     }
 
     // --- FILE SYSTEM API HELPERS ---
@@ -178,7 +275,10 @@ document.getElementById('openFileBtn').onclick = async () => {
         fileHandle = newHandle; // Remember this location/file
         
         const file = await fileHandle.getFile();
-        combinations = JSON.parse(await file.text());
+        const data = JSON.parse(await file.text());
+        if (!Array.isArray(data)) { alert("That file is not a list of combinations."); return; }
+        combinations = data;
+        // A real handle, so Save writes straight back to this file.
         document.getElementById('fileStatus').textContent = `Linked: ${file.name}`;
         renderList();
     } catch (e) { 
@@ -204,16 +304,29 @@ const saveFile = async (isSaveAs = false) => {
     document.getElementById('saveAsBtn').onclick = () => saveFile(true);
 
     // --- GEOJSON LOGIC ---
+    // Split out from the file input so the scenario auto-load below runs the
+    // same code rather than a second copy of it.
+    function applyDemandPoints(data) {
+        const cats = new Set();
+        (data.features || []).forEach(f => { if (f.properties?.category) cats.add(f.properties.category); });
+        categories = Array.from(cats);
+        updateCategoryUI();
+        document.getElementById('addComboBtn').disabled = categories.length === 0;
+        return categories.length;
+    }
+
     document.getElementById('geoInput').onchange = (e) => {
         const file = e.target.files[0];
+        if (!file) return;
         const reader = new FileReader();
         reader.onload = (ev) => {
-            const data = JSON.parse(ev.target.result);
-            const cats = new Set();
-            data.features.forEach(f => { if (f.properties?.category) cats.add(f.properties.category); });
-            categories = Array.from(cats);
-            updateCategoryUI();
-            document.getElementById('addComboBtn').disabled = false;
+            try {
+                if (!applyDemandPoints(JSON.parse(ev.target.result))) {
+                    alert("No features with a 'category' property in that file.");
+                    return;
+                }
+                setScenarioStatus(`demand points: ${file.name} (${categories.length} categories)`);
+            } catch (err) { alert("Invalid GeoJSON"); console.error(err); }
         };
         reader.readAsText(file);
     };

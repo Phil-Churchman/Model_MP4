@@ -3,6 +3,9 @@ import collections
 import os
 import geopandas as gpd
 import osmnx as ox
+# LineString, Point, mapping and json are now used only by the roads.geojson
+# block in get_roads(), which is commented out. Kept so uncommenting that
+# block is the only edit needed to get the file back.
 from shapely.geometry import LineString, Point, mapping
 import json
 
@@ -191,28 +194,33 @@ def get_roads(geojson_path="area.geojson", output_path=".",
     print(f"OSMnx GraphML saved to {graphml_file}")
 
     # -------------------------------------------------------------
-    # 4. Create GeoJSON for visualization
+    # 4. GeoJSON for visualisation -- NOT WRITTEN
     # -------------------------------------------------------------
-    features = []
-    for u, v, data in G.edges(data=True):
-        # Coordinates
-        if "geometry" in data:
-            coords = list(data["geometry"].coords)
-        else:
-            # Straight line if no geometry
-            coords = [(G.nodes[u]["x"], G.nodes[u]["y"]),
-                      (G.nodes[v]["x"], G.nodes[v]["y"])]
-        # Create LineString feature
-        features.append({
-            "type": "Feature",
-            "geometry": mapping(LineString(coords)),
-            "properties": {k: str(v) for k, v in data.items() if k != "geometry"}
-        })
-
-    geojson_file = os.path.join(output_path, "roads.geojson")
-    with open(geojson_file, "w") as f:
-        json.dump({"type": "FeatureCollection", "features": features}, f)
-    print(f"GeoJSON saved to {geojson_file}")
+    # roads.geojson was a second copy of the same network, for looking at in
+    # a GIS. Nothing in the model ever read it back: every consumer -- the
+    # simulation, clean_data, captured_trips_to_geojson -- loads the GraphML
+    # above, and no browser tool requests it. It was also the single largest
+    # thing in the repository, 637 MB across the scenarios, so it is no longer
+    # written. Uncomment to get it back for one-off inspection; the GraphML it
+    # is derived from is still saved either way.
+    #
+    # features = []
+    # for u, v, data in G.edges(data=True):
+    #     if "geometry" in data:
+    #         coords = list(data["geometry"].coords)
+    #     else:
+    #         coords = [(G.nodes[u]["x"], G.nodes[u]["y"]),
+    #                   (G.nodes[v]["x"], G.nodes[v]["y"])]
+    #     features.append({
+    #         "type": "Feature",
+    #         "geometry": mapping(LineString(coords)),
+    #         "properties": {k: str(v) for k, v in data.items() if k != "geometry"}
+    #     })
+    #
+    # geojson_file = os.path.join(output_path, "roads.geojson")
+    # with open(geojson_file, "w") as f:
+    #     json.dump({"type": "FeatureCollection", "features": features}, f)
+    # print(f"GeoJSON saved to {geojson_file}")
 
     # -------------------------------------------------------------
     # 5. Done

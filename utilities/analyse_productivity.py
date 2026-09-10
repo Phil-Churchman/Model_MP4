@@ -7,7 +7,7 @@ import matplotlib.ticker as ticker
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scenario_config import scenario_from_cli
+from scenario_config import scenario_from_cli, writable_path
 
 
 def process_agent_data(directory):
@@ -21,7 +21,9 @@ def process_agent_data(directory):
         "Trip - hail": "Trip - to hail",
         "Trip - taxi": "Trip - to taxi rank",
         "Trip - to_swap": "Trip - to swap station",
-        "Trip - passenger": "Trip - passenger"
+        "Trip - passenger": "Trip - passenger",
+        "Trip - to_base": "Trip - to base",
+        "Stop - to_base": "Stop - at base"
     }
 
     for file in files:
@@ -61,7 +63,8 @@ def main():
     # Save Statistics CSV
     stats = df.groupby("label")["total_time"].agg(["max", "min", "mean", "std"]).reset_index()
     stats.columns = ["Activity Type", "Max Time (min)", "Min Time (min)", "Average Time (min)", "Std Dev (min)"]
-    stats.to_csv(os.path.join(output_path, "agent_time_statistics.csv"), index=False)
+    stats.to_csv(writable_path(os.path.join(output_path, "agent_time_statistics.csv")),
+                 index=False)
 
     # Create Grid Histograms
     labels = sorted(df["label"].unique())
@@ -104,7 +107,7 @@ def main():
         axes[j].set_visible(False)
 
     plt.tight_layout()
-    plt.savefig(os.path.join(output_path, "agent_time_histograms.png"))
+    plt.savefig(writable_path(os.path.join(output_path, "agent_time_histograms.png")))
     print(f"Wrote agent_time_statistics.csv and agent_time_histograms.png to {output_path}")
 
 
