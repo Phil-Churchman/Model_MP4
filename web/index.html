@@ -144,7 +144,7 @@
       <div class="card mb-4" id="tasksCard">
         <div class="card-header">
           <span class="card-title d-flex align-items-center gap-2">
-            <i class="bi bi-play-circle text-body-secondary"></i> Tasks
+            <i class="bi bi-play-circle text-body-secondary"></i> Python Tasks
           </span>
         </div>
         <div class="card-body"><div id="tasks"><span class="row-note">…</span></div></div>
@@ -153,7 +153,7 @@
       <div class="card" id="toolsCard">
         <div class="card-header">
           <span class="card-title d-flex align-items-center gap-2">
-            <i class="bi bi-window-stack text-body-secondary"></i> Tools
+            <i class="bi bi-window-stack text-body-secondary"></i> HTML Tools
           </span>
         </div>
         <div class="card-body"><div id="tools"><span class="row-note">…</span></div></div>
@@ -165,7 +165,7 @@
       <div class="card mb-4" id="outputCard">
         <div class="card-header d-flex align-items-center justify-content-between gap-2">
           <span class="card-title d-flex align-items-center gap-2">
-            <i class="bi bi-terminal text-body-secondary"></i> Output
+            <i class="bi bi-terminal text-body-secondary"></i> Python Task Output
           </span>
           <span class="d-flex align-items-center gap-2">
             <span id="jobStatus" class="ap-pill">idle</span>
@@ -761,8 +761,6 @@ function renderBoard() {
         <span><span class="dot dot-${a.status}"></span>${a.label}</span>
         <span class="row-note">
           ${describe(a)}
-          ${previewButtons(a.previews, "ms-2")}
-          ${downloadButtons(a.downloads, "ms-2")}
         </span>
       </div>`).join("");
   }).join("");
@@ -789,17 +787,40 @@ async function loadTasks() {
   renderTasks();
 }
 
-// Figures a task has already produced, linked from its row. Rendered only when
-// the file exists, which is also why this is per-scenario rather than baked
+// Everything a task has already written that can be opened or saved: the
+// figures and files the task itself declares, plus the ones hanging off the
+// artefacts it produces. The second half used to be rendered on the pipeline
+// board instead, which split one job's outputs across two panes -- the charge
+// profile drew its PNGs onto the board row and its total_load download onto
+// the task row. They all belong against the job that wrote them.
+//
+// Merged here rather than in the registry because the two declarations answer
+// different questions -- which figures a task draws, and which figures belong
+// to an artefact -- and both stay true whatever the panel does with them.
+function taskOutputs(t) {
+  const artefacts = (SCENARIO && SCENARIO.artefacts) || [];
+  const gather = (taskKey, artefactKey) => {
+    const declared = (SCENARIO && SCENARIO[taskKey] && SCENARIO[taskKey][t.id]) || [];
+    const inherited = artefacts.filter(a => a.produced_by === t.id)
+                               .flatMap(a => a[artefactKey] || []);
+    // Deduped by url: charge_profile declares the same two PNGs on the task
+    // and on the artefact it writes, and a row carrying each button twice is
+    // worse than either half on its own.
+    const seen = new Set();
+    return [...declared, ...inherited].filter(f => !seen.has(f.url) && seen.add(f.url));
+  };
+  return { previews: gather("task_previews", "previews"),
+           downloads: gather("task_downloads", "downloads") };
+}
+
+// The buttons for those outputs, on the task's own row. Rendered only for what
+// is actually on disk, which is also why this is per-scenario rather than baked
 // into the task list fetched once at start-up.
-function previewLinks(t) {
-  const shots = (SCENARIO && SCENARIO.task_previews
-                 && SCENARIO.task_previews[t.id]) || [];
-  const files = (SCENARIO && SCENARIO.task_downloads
-                 && SCENARIO.task_downloads[t.id]) || [];
-  if (!shots.length && !files.length) return "";
-  return `<span class="d-block mt-1">${previewButtons(shots, "me-1")}`
-       + `${downloadButtons(files, "me-1")}</span>`;
+function outputLinks(t) {
+  const { previews, downloads } = taskOutputs(t);
+  if (!previews.length && !downloads.length) return "";
+  return `<span class="d-block mt-1">${previewButtons(previews, "me-1")}`
+       + `${downloadButtons(downloads, "me-1")}</span>`;
 }
 
 // One figure gets a plain PNG button. Several get the part of the filename
@@ -864,7 +885,7 @@ function renderTasks() {
               ? '<span class="ap-pill is-error ms-1">terminal only</span>' : ""}
           </span>
           <span class="row-note">${t.description}</span>
-          ${previewLinks(t)}
+          ${outputLinks(t)}
         </span>
         <button class="btn btn-sm ${t.runnable ? "btn-primary" : "btn-secondary"}"
                 data-task="${t.id}" ${t.runnable ? "" : "disabled"}
