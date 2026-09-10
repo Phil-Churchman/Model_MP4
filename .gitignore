@@ -200,6 +200,14 @@ scenarios_output/*
 # scenarios_shared/ is deliberately NOT here: the scenario files in it
 # are the ones meant to be committed.
 scenarios_private/*
+# ...except the marker that keeps the folder itself. Git tracks files,
+# not directories, so without this a fresh clone has no
+# scenarios_private/ -- and nothing makes one on demand: the copy button
+# puts a copy beside its original, so a private scenario only ever
+# arrives here by hand, into a folder that has to already exist. The
+# rule above ignores the folder's CONTENTS rather than the folder, which
+# is what leaves this negation able to take effect.
+!scenarios_private/.gitkeep
 
 # osmnx's HTTP download cache -- the raw Overpass API responses behind
 # roads.graphml. Re-fetched on demand, machine-specific, and by far the
