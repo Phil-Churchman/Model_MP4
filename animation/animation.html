@@ -95,6 +95,9 @@ html, body {
        <span id="pickupLegend" class="legend-item d-flex align-items-center me-3">
         <span class="legend-circle mx-1" style="background:orange"></span>Pickup
       </span>
+      <span id="returnToBaseLegend" class="legend-item d-flex align-items-center me-3">
+        <span class="legend-circle mx-1" style="background:#00bcd4;"></span>Return to base
+      </span>
       <span id="swapLegend" class="legend-item d-flex align-items-center me-3">
         <span class="legend-circle mx-1" style="background:red;"></span>Swap
       </span>
@@ -259,8 +262,24 @@ async function loadGeoJSON(file, layer) {
   }
 }
 
+// The colour a trip is drawn in. Anything unnamed falls through to black,
+// which is also idle -- so a trip type with no entry here is invisible as a
+// type: it looks like a parked vehicle that happens to be moving. That is what
+// return_to_base did before it was given the cyan below.
+const RETURN_TO_BASE_COLOR = "#00bcd4";
+
 function getColor(type) {
-  const colors = { "to_swap": "red", "taxi": "blue", "hail": "purple", "passenger": "green", "pickup": "orange" };
+  const colors = { "to_swap": "red", "taxi": "blue", "hail": "purple",
+                   "passenger": "green", "pickup": "orange",
+                   // Cyan rather than one of the free hues: blue and purple
+                   // belong to the hail-rank trip types, and although those
+                   // can never appear in the same run as this one, a colour
+                   // meaning two things depending on the mode is a trap for
+                   // whoever compares two animations side by side.
+                   "return_to_base": RETURN_TO_BASE_COLOR,
+                   // The name this type carried before it was renamed, so an
+                   // animation of a run made under the old one still draws.
+                   "to_base": RETURN_TO_BASE_COLOR };
   return colors[type] || "black";
 }
 
@@ -467,6 +486,16 @@ async function loadScenarioAndData() {
     else {
       const pickupLegend = document.getElementById('pickupLegend');
       if (pickupLegend) pickupLegend.remove();
+    }
+
+    // Going home is a demand_model behaviour the scenario has to ask for --
+    // note the mode test is the literal one, not DEMAND_MODEL above, which is
+    // also true in distribution mode and that mode never sends a vehicle home.
+    // Removed rather than left showing, so the legend never offers a colour
+    // that cannot appear on the map.
+    if (!(SIM_MODE === "demand_model" && scenario.return_to_base)) {
+      const returnLegend = document.getElementById('returnToBaseLegend');
+      if (returnLegend) returnLegend.remove();
     }
 
     const areaFeats = await loadGeoJSON(AREA_FILE, areaLayer);

@@ -22,6 +22,12 @@ def process_agent_data(directory):
         "Trip - taxi": "Trip - to taxi rank",
         "Trip - to_swap": "Trip - to swap station",
         "Trip - passenger": "Trip - passenger",
+        "Trip - return_to_base": "Trip - to base",
+        "Stop - return_to_base": "Stop - at base",
+        # The name this trip type carried before it was renamed after the
+        # scenario key. Kept so a run made under the old name still tabulates
+        # under the same two labels as one made since, rather than appearing
+        # as a separate pair of raw "Trip - to_base" rows in the same chart.
         "Trip - to_base": "Trip - to base",
         "Stop - to_base": "Stop - at base"
     }

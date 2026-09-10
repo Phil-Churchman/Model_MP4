@@ -762,6 +762,7 @@ function renderBoard() {
         <span class="row-note">
           ${describe(a)}
           ${previewButtons(a.previews, "ms-2")}
+          ${downloadButtons(a.downloads, "ms-2")}
         </span>
       </div>`).join("");
   }).join("");
@@ -794,8 +795,11 @@ async function loadTasks() {
 function previewLinks(t) {
   const shots = (SCENARIO && SCENARIO.task_previews
                  && SCENARIO.task_previews[t.id]) || [];
-  if (!shots.length) return "";
-  return `<span class="d-block mt-1">${previewButtons(shots, "me-1")}</span>`;
+  const files = (SCENARIO && SCENARIO.task_downloads
+                 && SCENARIO.task_downloads[t.id]) || [];
+  if (!shots.length && !files.length) return "";
+  return `<span class="d-block mt-1">${previewButtons(shots, "me-1")}`
+       + `${downloadButtons(files, "me-1")}</span>`;
 }
 
 // One figure gets a plain PNG button. Several get the part of the filename
@@ -818,6 +822,19 @@ function previewButtons(shots, spacing) {
     `<a class="btn btn-sm btn-outline-secondary ${spacing} py-0"
         href="${p.url}" target="_blank" rel="noopener"
         title="${p.name}">${labels[i]}</a>`).join("");
+}
+
+// Data files meant to leave the model, beside the figures. Labelled with the
+// filename rather than "Download": total_load.csv and total_load.zip are the
+// same button on different scenarios, and which one you got is the thing worth
+// saying. The download attribute is what makes the browser save it to the
+// downloads folder instead of showing a zip's bytes, or a csv, in a new tab.
+function downloadButtons(files, spacing) {
+  if (!files || !files.length) return "";
+  return files.map(f =>
+    `<a class="btn btn-sm btn-outline-primary ${spacing} py-0"
+        href="${f.url}" download="${f.name}"
+        title="Download ${f.name}">&darr; ${f.name}</a>`).join("");
 }
 
 // Split from loadTasks so switching scenario re-filters without re-fetching.

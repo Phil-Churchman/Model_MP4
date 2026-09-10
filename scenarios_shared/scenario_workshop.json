@@ -8,7 +8,7 @@
   "animation_agents": 10,
   "probability_hail": 0.75,
   "start_time": [2025, 1, 4, 0, 0, 0],
-  "end_time": [2026, 1, 4, 0, 0, 0],
+  "end_time": [2025, 2, 4, 0, 0, 0],
   "swap_wait_sec": 600,
   "max_total_distance_m": 80000,
   "buffer_distance": 15000,

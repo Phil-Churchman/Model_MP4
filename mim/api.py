@@ -192,6 +192,16 @@ def artefact_status(scenario):
                             for f in (art.previews if exists else ()))
             if os.path.exists(full)]
 
+        # Data files written for use outside the model, offered as a download.
+        # Gated on the artefact existing for the same reason the figures are: a
+        # total_load.csv sitting beside no charge profile is the previous run's,
+        # and the row it would hang off says nothing about that.
+        entry["downloads"] = [
+            {"name": os.path.basename(f), "url": served_url(full)}
+            for f, full in ((f, task_registry.scenario_path(scenario, f))
+                            for f in (art.downloads if exists else ()))
+            if os.path.exists(full)]
+
         if exists:
             entry["modified"] = int(_newest_mtime(path))
             if os.path.isdir(path):
@@ -277,6 +287,13 @@ def get_scenario(name: str):
             t.id: [{"name": os.path.basename(f),
                     "url": served_url(task_registry.scenario_path(s, f))}
                    for f in t.existing_previews(s)]
+            for t in task_registry.TASKS},
+        # Data files a task has written for use outside the model, on the same
+        # terms: only what is on disk, and named so the row can say which.
+        "task_downloads": {
+            t.id: [{"name": os.path.basename(f),
+                    "url": served_url(task_registry.scenario_path(s, f))}
+                   for f in t.existing_downloads(s)]
             for t in task_registry.TASKS},
     }
 

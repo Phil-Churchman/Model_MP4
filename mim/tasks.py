@@ -126,6 +126,12 @@ class Task:
     # winner, and showing only one of them would be an odd thing to choose.
     # Declared rather than derived: the names do not follow from the task id.
     previews: tuple = ()
+    # Data files this task writes for use outside the model, offered as a
+    # download rather than a link. Listed as every name the task might write,
+    # not the one it did: battery_charge_profile writes total_load.csv at a
+    # one-station scenario and total_load.zip at a four-station one, and only
+    # what is actually on disk is ever offered.
+    downloads: tuple = ()
 
     def is_relevant(self, mode):
         return mode in self.modes
@@ -133,6 +139,11 @@ class Task:
     def existing_previews(self, scenario):
         """The figures that are actually on disk, as scenario-relative paths."""
         return [f for f in self.previews
+                if os.path.exists(scenario_path(scenario, f))]
+
+    def existing_downloads(self, scenario):
+        """The download files actually on disk, as scenario-relative paths."""
+        return [f for f in self.downloads
                 if os.path.exists(scenario_path(scenario, f))]
 
     def is_available(self, scenario):
@@ -186,12 +197,15 @@ TASKS = [
          "utilities/battery_charge_profile.py", DERIVE,
          "Models the charging queue behind the returned batteries under both "
          "the immediate and window strategies. Draws battery_charge_load.png "
-         "and battery_charge_states.png.",
+         "and battery_charge_states.png, and writes the hourly load as "
+         "total_load.csv (total_load.zip, one file per station, when there is "
+         "more than one).",
          "analyse", modes=RUNNABLE_MODES,
          requires=("output/swap_station_activity.xlsx",),
          newer_than=("output/output_trips_time_queued",),
          previews=("output/battery_charge_load.png",
-                   "output/battery_charge_states.png")),
+                   "output/battery_charge_states.png"),
+         downloads=("output/total_load.csv", "output/total_load.zip")),
     Task("station_utilisation", "swap_station_arrivals.csv",
          "utilities/swap_station_utilisation.py", DERIVE,
          "Arrival profile per station. Also draws "
@@ -467,6 +481,10 @@ class Artefact:
     # A tuple, as on Task, because one job can draw more than one figure and a
     # single slot silently dropped the rest.
     previews: tuple = ()
+    # Data files written alongside this one that are meant to leave the model
+    # -- offered on the row as a download rather than a link. Every name the
+    # job might write; the board offers whichever is on disk.
+    downloads: tuple = ()
 
     def is_required(self, mode):
         if self.required_when == ALWAYS:
@@ -576,7 +594,8 @@ ARTEFACTS = [
              depends_on=("activity",), produced_by="charge_profile",
              required_when=RUNNABLE_MODES,
              previews=("output/battery_charge_load.png",
-                       "output/battery_charge_states.png")),
+                       "output/battery_charge_states.png"),
+             downloads=("output/total_load.csv", "output/total_load.zip")),
 ]
 
 # How far apart two files written by one run may be before the older one is

@@ -36,7 +36,7 @@ four-station scenario has four times that many chargers in play. When there is
 more than one station the charts and the workbook carry an "All stations" row
 as well, which is the sum of the individual ones.
 
-Three outputs, all into the scenario's output folder:
+Four outputs, all into the scenario's output folder:
 
     battery_charge_load.png     hourly mean grid load in kW, per station
     battery_charge_states.png   returned batteries by state, per station
@@ -44,6 +44,10 @@ Three outputs, all into the scenario's output folder:
                                 group per station; summary, one row per station;
                                 batteries, the energy each returned battery
                                 needed; settings, what this was run with
+    total_load.csv              the same hourly grid draw in Wh, in the shape a
+                                network load model reads it. One station writes
+                                the csv; several write total_load.zip, holding
+                                one total_load_##.csv per station id.
 
 The reporting horizon is the simulation period plus the 24 hours after it, so
 the backlog left at the end of the run is visible rather than truncated away.
@@ -58,6 +62,7 @@ Usage:
 
 import os
 import sys
+import zipfile
 from datetime import datetime, timedelta
 from heapq import heappush, heappop
 
@@ -669,6 +674,10 @@ def build_panels(batteries, params, bins, horizon_start, horizon_end,
         panels.append({
             "key": f"station_{name}",
             "title": f"Station {name}",
+            # The id on its own, as well as inside the key: total_load_##.csv is
+            # named after the station, and slicing it back out of "station_3"
+            # would be reconstructing something already known here.
+            "station": name,
             "is_total": False,
             "slots": params["slots"],
             "ceiling": ceiling,
@@ -683,6 +692,7 @@ def build_panels(batteries, params, bins, horizon_start, horizon_end,
         panels.insert(0, {
             "key": ALL_STATIONS,
             "title": f"All stations ({len(names)})",
+            "station": None,
             "is_total": True,
             "slots": params["slots"] * len(names),
             "ceiling": ceiling * len(names),
@@ -723,6 +733,85 @@ def summarise(panel, efficiency):
         "charged_stock_low_point": series["stock_low_point"],
         "spare_batteries_required": -series["stock_low_point"],
     }
+
+
+# ============================================================
+# THE LOAD PROFILE, AS A NETWORK MODEL READS IT
+# ============================================================
+
+# The three load categories a total_load.csv carries, in order. Only commercial
+# is filled: a swap station is a commercial connection, and the other two are
+# there because the file is read by a model that expects all three columns
+# whether or not the site has any domestic or public load on it.
+LOAD_COLUMNS = ["domestic", "commercial", "public"]
+
+# The two names this writes under. Both are cleared before either is written:
+# a scenario that drops from four stations to one would otherwise leave the old
+# zip beside the new csv, and nothing about the pair says which run is which.
+TOTAL_LOAD_CSV, TOTAL_LOAD_ZIP = "total_load.csv", "total_load.zip"
+
+
+def total_load_frame(series):
+    """
+    One row per hour of the reported horizon, in the total_load.csv shape.
+
+    The commercial column is the same number as the workbook's ``load_Wh``: the
+    mean draw at the meter over the hour, in watts, which over one hour is the
+    watt-hours the hour consumed. Rounded to whole Wh -- the input it is built
+    from is a modelled distance, so the fractions are noise being carried at
+    full width.
+    """
+    return pd.DataFrame({"domestic": 0,
+                         "commercial": np.rint(series["load_wh"]).astype(int),
+                         "public": 0},
+                        columns=LOAD_COLUMNS)
+
+
+def station_file_id(name):
+    """
+    The ## in total_load_##.csv.
+
+    Zero-padded to two digits when the id is a number, so the files sort in the
+    order the stations are numbered rather than 1, 10, 11, 2. An id that is not
+    a number is used as it stands: padding it would be inventing a station name.
+    """
+    return f"{int(name):02d}" if str(name).isdigit() else str(name)
+
+
+def write_total_load(panels, output_dir):
+    """
+    total_load.csv, or total_load.zip when the scenario has more than one station.
+
+    Per station, never the "All stations" panel: the point of the file is to
+    size the connection at a site, and the pooled total is not a connection
+    anyone builds. One station therefore writes the csv on its own rather than a
+    zip holding a single member.
+    """
+    paths = {name: os.path.join(output_dir, name)
+             for name in (TOTAL_LOAD_CSV, TOTAL_LOAD_ZIP)}
+    for stale in paths.values():
+        try:
+            os.remove(stale)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            print(f"\n  Could not delete the previous "
+                  f"{os.path.basename(stale)} (it is probably open in "
+                  f"another program).")
+
+    stations = [p for p in panels if not p["is_total"]]
+    if len(stations) == 1:
+        out = writable_path(paths[TOTAL_LOAD_CSV])
+        total_load_frame(stations[0]["series"]).to_csv(out)
+        return out
+
+    out = writable_path(paths[TOTAL_LOAD_ZIP])
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        for panel in stations:
+            archive.writestr(
+                f"total_load_{station_file_id(panel['station'])}.csv",
+                total_load_frame(panel["series"]).to_csv())
+    return out
 
 
 def main():
@@ -859,9 +948,17 @@ def main():
         per_battery.to_excel(writer, sheet_name="batteries", index=False)
         settings.to_excel(writer, sheet_name="settings", index=False)
 
+    # The same hourly numbers again, in the shape a network load model reads
+    # them. Built from the panels rather than from `hourly` so a per-station
+    # file is that station's series, not a column sliced back out of a wide
+    # table on the strength of its name.
+    total_load = write_total_load(panels, scenario.output_dir)
+
     print(f"\n  wrote {os.path.basename(load_png)}, "
-          f"{os.path.basename(states_png)} and {os.path.basename(xlsx)}\n"
-          f"  into {scenario.output_dir}")
+          f"{os.path.basename(states_png)}, {os.path.basename(xlsx)} and "
+          f"{os.path.basename(total_load)}"
+          + (f" ({len(stations)} station files)" if len(stations) > 1 else "")
+          + f"\n  into {scenario.output_dir}")
 
 
 def _hhmm(seconds):

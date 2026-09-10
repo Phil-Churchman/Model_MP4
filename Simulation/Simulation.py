@@ -801,7 +801,12 @@ def calculate_next_activity(req):
             # fleet-wide look-ahead reads as "there is work" and leaves parked.
             # Once at base the position test stops either from repeating, and
             # the vehicle simply stays idle.
-            trip_type = "to_base"
+            #
+            # Named for the scenario key that turns it on, so a trip in the
+            # output says which setting produced it. This branch is reached
+            # only from the demand_model arm above, so return_to_base is a
+            # demand-model trip type and nothing else writes one.
+            trip_type = "return_to_base"
         else:
             return None
 
@@ -810,7 +815,7 @@ def calculate_next_activity(req):
     # the passenger trip by the next fare wait.
     if trip_type == "to_swap":
         wait_sec_raw = SWAP_WAIT_SEC
-    elif trip_type == "to_base":
+    elif trip_type == "return_to_base":
         # No dwell: the vehicle parks and is idle again on the next timestep,
         # free to be allocated the moment demand appears.
         wait_sec_raw = 0
@@ -829,7 +834,7 @@ def calculate_next_activity(req):
         target_node = allocated_trip["dest_node"]
     elif trip_type == "pickup" and DEMAND_MODEL:
         target_node = allocated_trip["source_node"]
-    elif trip_type == "to_base":
+    elif trip_type == "return_to_base":
         target_node = req.base_node
     else:
         target_node = get_target_node(req.pos, trip_type, budget_m)
@@ -875,7 +880,7 @@ def calculate_next_activity(req):
 
     if trip_type == "to_swap":
         running_total, trip_count = 0, 0
-    elif trip_type == "to_base":
+    elif trip_type == "return_to_base":
         # The drive home spends range like any other, but it is not a step in
         # the pickup/passenger cycle: trip_count parity is what pairs those two
         # (and what is_swap tests), so advancing it here would invert the order
