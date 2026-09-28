@@ -184,7 +184,7 @@ same from anywhere.
 
 | Script | Does |
 |---|---|
-| `Simulation/Simulation.py` | The run. Archives the previous results to `output/runs/` first, then writes per-agent tracks, demand outcomes and swap-station timesteps. |
+| `Simulation/Simulation.py` | The run. Deletes the previous results from the output folder first — no copy is kept — then writes per-agent tracks, demand outcomes and swap-station timesteps. |
 | `Simulation/trip_demand_generator.py` | The demand generator on its own, writing `trip_demand.geojson` without a full run |
 
 **analyse** — turn a finished run into results

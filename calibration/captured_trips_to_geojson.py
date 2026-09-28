@@ -35,7 +35,7 @@ from scipy.spatial import cKDTree
 from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from output_archive import OutputArchive
+from output_clear import OutputCleaner
 from scenario_config import (load_scenario, add_scenario_argument,
                              load_road_speeds, road_speeds_ms)
 
@@ -488,14 +488,14 @@ def main():
     # This writes agent_XXXX_time.geojson into the folder the simulation writes
     # the same filenames into, and only creates files -- so a capture covering
     # fewer agents than the last run would leave that run's surplus files behind,
-    # mixed in and indistinguishable. Archiving first is what makes the folder
-    # hold one dataset rather than two, and it puts the previous contents in
-    # output/runs/<timestamp>/ rather than deleting them.
+    # mixed in and indistinguishable. Clearing first is what makes the folder
+    # hold one dataset rather than two. The previous contents are deleted, not
+    # kept anywhere, so this replaces whatever run was there.
     #
     # Only when writing to the scenario's own output folder: --out-dir names
     # somewhere the caller chose, and clearing that is not this script's call.
     if os.path.abspath(args.out_dir) == os.path.abspath(DEFAULT_OUTPUT_DIR):
-        OutputArchive.for_scenario(SCENARIO).archive_output_dir()
+        OutputCleaner.for_scenario(SCENARIO).clear_output_dir()
 
     os.makedirs(args.out_dir, exist_ok=True)
 

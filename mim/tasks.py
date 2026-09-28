@@ -13,17 +13,20 @@ MODEL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Safety classes, in increasing order of consequence:
 #   read        writes nothing
 #   derive      adds derived files alongside existing output; nothing is lost
-#   confirm     replaces the current results, but the previous state is
-#               recoverable -- the simulation archives the run it replaces, and
-#               the area builder keeps a backup. Allowed, on an explicit yes.
-#   irreversible allowed too, but nothing is kept: re-downloading a road network
-#               replaces the one your finished results were computed against,
-#               with today's OSM data. Warned about in the strongest terms the
-#               UI has, then run if you say so.
+#   confirm     replaces the current results, and says which before it does.
+#               How much comes back varies and the dialog is where that is
+#               spelled out: the area builder keeps a backup, while the
+#               simulation and the captured-trips export delete the output
+#               folder and write it again. Allowed, on an explicit yes.
+#   irreversible allowed too, but what it replaces is an INPUT rather than a
+#               result: re-downloading a road network replaces the one your
+#               finished results were computed against, with today's OSM data,
+#               and no run of anything here will reproduce it. Warned about in
+#               the strongest terms the UI has, then run if you say so.
 #   destructive not offered at all, because the damage would not be just loss
 #               but a folder holding two datasets that look like one. Nothing is
-#               in this class now: captured_trips was, until it began archiving
-#               the previous contents the way the simulation does.
+#               in this class now: captured_trips was, until it began clearing
+#               the output folder the way the simulation does.
 READ, DERIVE, CONFIRM, IRREVERSIBLE, DESTRUCTIVE = (
     "read", "derive", "confirm", "irreversible", "destructive")
 
@@ -96,6 +99,18 @@ def newest_mtime(path):
     return newest or os.path.getmtime(path)
 
 
+def oldest_mtime(path):
+    """
+    Modification time of a file, or of the oldest file inside a directory --
+    when a run began writing it, where newest_mtime is when it finished.
+    """
+    if os.path.isfile(path):
+        return os.path.getmtime(path)
+    with os.scandir(path) as entries:
+        times = [e.stat().st_mtime for e in entries if e.is_file()]
+    return min(times) if times else os.path.getmtime(path)
+
+
 @dataclass(frozen=True)
 class Task:
     id: str
@@ -121,30 +136,12 @@ class Task:
     # a scenario holding an old export and no run at all is a legitimate thing
     # to analyse.
     newer_than: tuple = ()
-    # Figures this task draws, relative to the scenario folder. A tuple rather
-    # than one path because trip_gap_bin_search draws both the search and the
-    # winner, and showing only one of them would be an odd thing to choose.
-    # Declared rather than derived: the names do not follow from the task id.
-    previews: tuple = ()
-    # Data files this task writes for use outside the model, offered as a
-    # download rather than a link. Listed as every name the task might write,
-    # not the one it did: battery_charge_profile writes total_load.csv at a
-    # one-station scenario and total_load.zip at a four-station one, and only
-    # what is actually on disk is ever offered.
-    downloads: tuple = ()
+    # What a task writes is not declared here: its figures and data files hang
+    # off the artefact row it produces on the pipeline board, so one job's
+    # outputs are listed in one place.
 
     def is_relevant(self, mode):
         return mode in self.modes
-
-    def existing_previews(self, scenario):
-        """The figures that are actually on disk, as scenario-relative paths."""
-        return [f for f in self.previews
-                if os.path.exists(scenario_path(scenario, f))]
-
-    def existing_downloads(self, scenario):
-        """The download files actually on disk, as scenario-relative paths."""
-        return [f for f in self.downloads
-                if os.path.exists(scenario_path(scenario, f))]
 
     def is_available(self, scenario):
         """Whether the inputs this task reads are on disk, and current."""
@@ -195,17 +192,13 @@ TASKS = [
     # export are indistinguishable from current ones once they are on disk.
     Task("charge_profile", "battery_charge_profile.xlsx",
          "utilities/battery_charge_profile.py", DERIVE,
-         "Models the charging queue behind the returned batteries under both "
-         "the immediate and window strategies. Draws battery_charge_load.png "
+         "Draws battery_charge_load.png "
          "and battery_charge_states.png, and writes the hourly load as "
          "total_load.csv (total_load.zip, one file per station, when there is "
          "more than one).",
          "analyse", modes=RUNNABLE_MODES,
          requires=("output/swap_station_activity.xlsx",),
-         newer_than=("output/output_trips_time_queued",),
-         previews=("output/battery_charge_load.png",
-                   "output/battery_charge_states.png"),
-         downloads=("output/total_load.csv", "output/total_load.zip")),
+         newer_than=("output/output_trips_time_queued",)),
     Task("station_utilisation", "swap_station_arrivals.csv",
          "utilities/swap_station_utilisation.py", DERIVE,
          "Arrival profile per station. Also draws "
@@ -230,8 +223,8 @@ TASKS = [
                    "geojson_files/roads.graphml")),
     Task("simulate", "Run simulation",
          "Simulation/Simulation.py", CONFIRM,
-         "Runs the fleet model. The run it replaces is moved to output/runs/ "
-         "first, unless the output is too large to be worth archiving.",
+         "Runs the fleet model. The previous run is deleted from the output "
+         "folder first and replaced by this one; no copy is kept.",
          "model", modes=RUNNABLE_MODES,
          requires=("geojson_files/roads.graphml",
                    "geojson_files/swap_stations.geojson")),
@@ -252,9 +245,9 @@ TASKS = [
     # sitting under "model" beside the simulation it is a control for.
     Task("captured_trips", "Captured trips to GeoJSON",
          "calibration/captured_trips_to_geojson.py", CONFIRM,
-         "Routes captured GPS trips and writes per-user tracks into output, "
-         "replacing whatever is there. The previous contents are archived to "
-         "output/runs/ first, as a simulation run would be.",
+         "Routes captured GPS trips and writes per-user tracks into output. "
+         "The previous contents are deleted first, as a simulation run would "
+         "delete them; no copy is kept.",
          "calibrate",
          requires=("captured_locations/chained_trip_data.csv",
                    "geojson_files/roads.graphml")),
@@ -293,32 +286,29 @@ TASKS = [
     Task("distance_discrepancy", "Distance discrepancy",
          "calibration/distance_discrepancy.py", DERIVE,
          "Distribution of routed minus recorded trip distance.",
-         "calibrate", requires=("output/output_trips_time_queued/trip_routing_analysis.csv",),
-         previews=("output/distance_discrepancy_histogram.png",)),
+         "calibrate", requires=("output/output_trips_time_queued/trip_routing_analysis.csv",)),
     Task("trip_gap_analysis", "Trip length by idle gap",
          "calibration/trip_gap_analysis.py", DERIVE,
          "Trip distance distributions split by how long the vehicle had waited.",
-         "calibrate", requires=("output/output_trips_time_queued/trip_routing_analysis.csv",),
-         previews=("output/trip_gap_analysis.png",)),
+         "calibrate", requires=("output/output_trips_time_queued/trip_routing_analysis.csv",)),
     Task("trip_gap_correlation", "Consecutive idle gaps",
          "calibration/trip_gap_correlation.py", DERIVE,
          "Whether the gap before a trip predicts the gap before the next.",
-         "calibrate", requires=("output/output_trips_time_queued/trip_routing_analysis.csv",),
-         previews=("output/trip_gap_correlation.png",)),
+         "calibrate", requires=("output/output_trips_time_queued/trip_routing_analysis.csv",)),
     Task("trip_gap_bin_search", "Idle gap bin search",
          "calibration/trip_gap_bin_search.py", DERIVE,
          "Sweeps gap bin counts to find the strongest association.",
-         "calibrate", requires=("output/output_trips_time_queued/trip_routing_analysis.csv",),
-         previews=("output/trip_gap_bin_search.png",
-                   "output/trip_gap_bin_best.png")),
+         "calibrate", requires=("output/output_trips_time_queued/trip_routing_analysis.csv",)),
 ]
 
 TASKS_BY_ID = {t.id: t for t in TASKS}
 
-# What the browser may launch. `confirm` became launchable once the simulation
-# started archiving the run it replaces; `irreversible` is launchable because
-# the warning is explicit about what will not come back. Only `destructive`
-# stays terminal-only, where the command has to be typed deliberately.
+# What the browser may launch. Both `confirm` and `irreversible` are launchable
+# because neither is launched silently: the dialog names the scenario and the
+# files at stake before anything runs, and the server refuses the request
+# without an explicit confirmation regardless of what the page sends. Only
+# `destructive` stays terminal-only, where the command has to be typed
+# deliberately.
 RUNNABLE_SAFETY = {READ, DERIVE, CONFIRM, IRREVERSIBLE}
 NEEDS_CONFIRMATION = {CONFIRM, IRREVERSIBLE}
 
@@ -478,13 +468,20 @@ class Artefact:
     # Declared rather than guessed from the filename: the stems do not match --
     # agent_time_statistics.csv is drawn as agent_time_histograms.png -- so
     # deriving them would find nothing for exactly the files that have one.
-    # A tuple, as on Task, because one job can draw more than one figure and a
-    # single slot silently dropped the rest.
+    # A tuple because one job can draw more than one figure and a single slot
+    # silently dropped the rest.
     previews: tuple = ()
     # Data files written alongside this one that are meant to leave the model
     # -- offered on the row as a download rather than a link. Every name the
-    # job might write; the board offers whichever is on disk.
+    # job might write; the board offers whichever is on disk. The artefact's
+    # own file is offered too when it is a CSV or spreadsheet (see
+    # DOWNLOADABLE), so it is not repeated here.
     downloads: tuple = ()
+    # Offer the artefact's own file even though it is not a CSV or
+    # spreadsheet. Opt-in per artefact rather than by extension, because most
+    # .json and .geojson files on the board are inputs, not results to take
+    # away.
+    downloadable: bool = False
 
     def is_required(self, mode):
         if self.required_when == ALWAYS:
@@ -516,6 +513,13 @@ ARTEFACTS = [
              "geojson_files/demand_frequencies.json", "inputs",
              required_when=DEMAND_MODEL_MODE),
 
+    # What clean_data writes, and what every later calibration step reads. Only
+    # a calibration scenario has a raw capture to clean.
+    Artefact("cleaned_gps", "gps_noise_reduced.xlsx",
+             "captured_locations/gps_noise_reduced.xlsx", "process",
+             depends_on=("roads",), produced_by="clean_data",
+             required_when=CALIBRATION),
+
     # Every mode writes these, and they are what the analyses and the animation
     # read, so they are the reference the rest of the model stage is dated
     # against. Named for the files on disk rather than "agent tracks", which did
@@ -539,7 +543,8 @@ ARTEFACTS = [
     # profiles changing under it. Which is what depends_on already checks.
     Artefact("trip_demand", "trip_demand.geojson", "output/trip_demand.geojson",
              "model", depends_on=("demand_points", "demand_freqs"),
-             produced_by="simulate", required_when=DEMAND_MODEL_MODE),
+             produced_by="simulate", required_when=DEMAND_MODEL_MODE,
+             downloadable=True),
     # met and unmet are written unconditionally, so they exist after any run --
     # but they are empty unless demand was generated, and an empty file that
     # looks like a result is worse than no row at all.
@@ -554,10 +559,12 @@ ARTEFACTS = [
     # trip could be met really does turn on the network and the stations.
     Artefact("met", "met_demand.json", "output/met_demand.json", "model",
              depends_on=("demand_points", "demand_freqs", "roads", "swap"),
-             produced_by="simulate", required_when=DEMAND_MODEL_MODE),
+             produced_by="simulate", required_when=DEMAND_MODEL_MODE,
+             downloadable=True),
     Artefact("unmet", "unmet_demand.json", "output/unmet_demand.json", "model",
              depends_on=("demand_points", "demand_freqs", "roads", "swap"),
-             produced_by="simulate", required_when=DEMAND_MODEL_MODE),
+             produced_by="simulate", required_when=DEMAND_MODEL_MODE,
+             downloadable=True),
     # How closely the run reproduced the distributions it was asked for. Dated
     # against the tracks rather than same_run_as: it is written by a separate
     # analysis afterwards, so being newer than the run is normal and being older
@@ -596,12 +603,57 @@ ARTEFACTS = [
              previews=("output/battery_charge_load.png",
                        "output/battery_charge_states.png"),
              downloads=("output/total_load.csv", "output/total_load.zip")),
+    # Measured from whatever tracks exist, so it belongs to every mode -- in
+    # calibration mode the tracks are the captured ones.
+    Artefact("deviation_factor", "deviation_factor.csv",
+             "output/deviation_factor.csv", "analyse",
+             depends_on=("tracks",), produced_by="deviation_factor"),
+
+    # Written by captured_trips_to_geojson beside the tracks it routes, and read
+    # by every calibration analysis below -- so they are dated against it.
+    Artefact("routing", "trip_routing_analysis.csv",
+             "output/output_trips_time_queued/trip_routing_analysis.csv",
+             "calibrate", depends_on=("roads",), produced_by="captured_trips",
+             required_when=CALIBRATION,
+             downloads=("output/output_trips_time_queued/agent_user_map.csv",)),
+    Artefact("road_speeds", "road_speed_calibration.csv",
+             "output/road_speed_calibration.csv", "calibrate",
+             depends_on=("routing",), produced_by="calibrate_speeds",
+             required_when=CALIBRATION),
+    Artefact("discrepancy", "distance_discrepancy_histogram.csv",
+             "output/distance_discrepancy_histogram.csv", "calibrate",
+             depends_on=("routing",), produced_by="distance_discrepancy",
+             required_when=CALIBRATION,
+             previews=("output/distance_discrepancy_histogram.png",)),
+    Artefact("gap_analysis", "trip_gap_analysis.csv",
+             "output/trip_gap_analysis.csv", "calibrate",
+             depends_on=("routing",), produced_by="trip_gap_analysis",
+             required_when=CALIBRATION,
+             previews=("output/trip_gap_analysis.png",)),
+    Artefact("gap_correlation", "trip_gap_correlation.csv",
+             "output/trip_gap_correlation.csv", "calibrate",
+             depends_on=("routing",), produced_by="trip_gap_correlation",
+             required_when=CALIBRATION,
+             previews=("output/trip_gap_correlation.png",)),
+    Artefact("gap_bin_search", "trip_gap_bin_search.csv",
+             "output/trip_gap_bin_search.csv", "calibrate",
+             depends_on=("routing",), produced_by="trip_gap_bin_search",
+             required_when=CALIBRATION,
+             previews=("output/trip_gap_bin_search.png",
+                       "output/trip_gap_bin_best.png")),
 ]
 
+# Artefacts whose own file is data worth taking out of the model, offered on
+# their row as a download alongside anything declared in `downloads`.
+DOWNLOADABLE = (".csv", ".xlsx")
+
 # How far apart two files written by one run may be before the older one is
-# treated as a leftover. The simulation writes the agent tracks, then the swap
-# timesteps, then the demand files, so they are never quite simultaneous; a run
-# long enough to matter is minutes apart, not seconds.
+# treated as a leftover. The simulation writes the swap timesteps and then the
+# agent tracks, so they are never quite simultaneous. Measured against the
+# first track written rather than the last: writing the tracks is a loop over
+# the fleet, 35s at 1400 agents, and timing from its end put every large run's
+# spreadsheet on the board as stale. A leftover from a previous run is behind
+# by the whole gap between runs, not seconds.
 SAME_RUN_TOLERANCE_S = 30
 
 ARTEFACTS_BY_KEY = {a.key: a for a in ARTEFACTS}

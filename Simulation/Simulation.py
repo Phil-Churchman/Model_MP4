@@ -24,7 +24,7 @@ from scipy.sparse.csgraph import dijkstra as csgraph_dijkstra
 from shapely.geometry import Point
 from pyproj import Transformer
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from output_archive import OutputArchive
+from output_clear import OutputCleaner
 from scenario_config import (load_scenario, add_scenario_argument,
                              load_road_speeds, road_speeds_ms,
                              load_trip_distributions, simulation_mode,
@@ -82,13 +82,6 @@ OUTPUT_DIR = SCENARIO.output_dir
 OUTPUT_PER_AGENT_DIR = os.path.join(OUTPUT_DIR, "output_trips")
 OUTPUT_PER_AGENT_TIME_DIR = os.path.join(OUTPUT_DIR, "output_trips_time_queued")
 
-# --- PREVIOUS-RUN ARCHIVE ---
-# archive_runs unset means "decide from the size": worth keeping for a 2 MB
-# scenario, not worth several gigabytes of OneDrive sync for a 400 MB one.
-RUNS_DIR_NAME = "runs"
-ARCHIVE_RUNS = scenario_cfg.get("archive_runs")            # True / False / None
-ARCHIVE_KEEP = int(scenario_cfg.get("archive_keep", 3))
-ARCHIVE_MAX_MB = float(scenario_cfg.get("archive_max_mb", 100))
 HISTOGRAM_PLOT = os.path.join(OUTPUT_DIR, "station_queues_analysis.png")
 SWAP_EXCEL_OUTPUT = os.path.join(OUTPUT_DIR, "swap_station_timesteps.xlsx")
 
@@ -943,10 +936,11 @@ def apply_update(agent, up):
 # ============================================================
 
 def main():
-    # Clear previous results before anything writes, so analysis can never mix
-    # this run's output with an earlier one's -- keeping them under runs/ where
-    # the scenario is small enough to be worth it.
-    OutputArchive.for_scenario(SCENARIO).archive_output_dir()
+    # Delete the previous results before anything writes, so analysis can never
+    # mix this run's output with an earlier one's. Nothing is kept: the previous
+    # run is gone from here on, and what replaces it is whatever this run
+    # produces.
+    OutputCleaner.for_scenario(SCENARIO).clear_output_dir()
 
     # Created up front: plot_station_queues, the Excel export and the demand
     # files all write here long before the per-agent save loop, so creating
@@ -1311,9 +1305,13 @@ def plot_station_queues(stations, output_path):
         ax.fill_between(times, pressure, step='post', alpha=0.3, color='#3498db')
         ax.axhline(y=1.0, color='red', linestyle='--', alpha=0.8, lw=2.5)
         
-        # Formatting
-        ax.xaxis.set_major_locator(mdates.HourLocator(interval=2))
-        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, pos: mdates.num2date(x).strftime('%I%p').lower().lstrip('0')))
+        # Formatting. Spacing follows the run length rather than a fixed two
+        # hours, which put ~370 overlapping labels on a month-long run; the
+        # concise formatter shows hours on a one-day run and dates on longer.
+        locator = mdates.AutoDateLocator(minticks=4, maxticks=10)
+        ax.xaxis.set_major_locator(locator)
+        ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+        ax.set_xlim(times[0], times[-1])
         ax.set_ylim(0, global_y_max * 1.1)
         
         # --- MODIFIED LINE BELOW ---

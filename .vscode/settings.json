@@ -7,5 +7,12 @@
     // ("..\\Model_data\\accra") resolves to in the browser.
     "liveServer.settings.mount": [
         ["/Model_data", "../Model_data"]
+    ],
+    "python-envs.pythonProjects": [
+        {
+            "path": "run_server.py",
+            "envManager": "ms-python.python:venv",
+            "packageManager": "ms-python.python:pip"
+        }
     ]
 }

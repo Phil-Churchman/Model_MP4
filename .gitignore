@@ -214,3 +214,8 @@ scenarios_private/*
 # largest thing here that is not a result. Unanchored, so it catches
 # "Road extraction/cache/" as well as the one at the root.
 cache/
+
+# Instructional graphics, the logo and the scripts that draw them. Kept
+# locally for workshop and teaching materials rather than in the repo.
+# Anchored so it matches only the top-level docs/ folder.
+/docs/

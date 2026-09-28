@@ -12,6 +12,20 @@
 <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
 <link href="css/apple.css" rel="stylesheet">
 
+<!-- Theme, set before first paint so a dark choice does not flash white. An
+     explicit attribute either way, never left to the OS: Bootstrap only swaps
+     its own component colours on data-bs-theme, so relying on the media query
+     alone would give apple.css's dark tokens under light Bootstrap parts. -->
+<script>
+  (function () {
+    let theme = null;
+    try { theme = localStorage.getItem("theme"); } catch {}
+    if (theme !== "light" && theme !== "dark")
+      theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    document.documentElement.setAttribute("data-bs-theme", theme);
+  })();
+</script>
+
 <style>
   /* Only what the design layer does not already cover. Everything here draws
      on its tokens rather than inventing new colours. */
@@ -70,7 +84,6 @@
 
   /* Config editor ------------------------------------------------------- */
   .cfg-input { max-width: 14rem; }
-  .row-item.is-readonly { background: var(--ap-fill); border-radius: var(--ap-r-sm); }
 </style>
 </head>
 <body>
@@ -80,7 +93,10 @@
     <a class="navbar-brand" href="/app/">
       <img src="img/moving-impact-logo.png" alt="Moving Impact">
     </a>
-    <span id="health" class="ap-pill"><span class="mono">connecting…</span></span>
+    <div class="d-flex align-items-center gap-2 ms-auto">
+      <span id="health" class="ap-pill"><span class="mono">connecting…</span></span>
+      <button id="themeBtn" class="btn btn-sm btn-secondary" type="button"></button>
+    </div>
   </div>
 </nav>
 
@@ -254,6 +270,23 @@
 <script>
 const $ = s => document.querySelector(s);
 
+// Light / dark toggle. The choice is remembered per browser; until one is
+// made, the page follows the OS (see the script in <head>).
+function renderThemeBtn() {
+  const dark = document.documentElement.getAttribute("data-bs-theme") === "dark";
+  const btn = $("#themeBtn");
+  btn.innerHTML = `<i class="bi ${dark ? "bi-sun" : "bi-moon"}"></i>`;
+  btn.title = btn.ariaLabel = dark ? "Switch to light mode" : "Switch to dark mode";
+}
+$("#themeBtn").onclick = () => {
+  const next = document.documentElement.getAttribute("data-bs-theme") === "dark"
+    ? "light" : "dark";
+  document.documentElement.setAttribute("data-bs-theme", next);
+  try { localStorage.setItem("theme", next); } catch {}
+  renderThemeBtn();
+};
+renderThemeBtn();
+
 // Tasks sits at the top of the right-hand column when there is room for three,
 // so the button you press and the log it writes to are side by side. Below that
 // width the right column drops to full width underneath, which would put Tasks
@@ -317,7 +350,7 @@ function stageApplies(stage) {
 let SCENARIO = null, EDITS = {}, currentJob = null, logOffset = 0, poller = null;
 
 // Fields the editor exposes with a typed control. Anything in the file but not
-// listed here is still shown and still saved -- the server merges rather than
+// listed here is not shown, but is still saved -- the server merges rather than
 // replaces, so an unrecognised key can never be dropped by saving.
 //
 // The optional fourth element carries per-field rules:
@@ -345,13 +378,19 @@ const FIELDS = [
   // Read by Simulation.py and by captured_trips_to_geojson.py, so it matters
   // while calibrating as well as while running.
   ["speed_based_routing",  "bool",   "Route on travel time rather than distance"],
-  ["agents",               "ints",   "Fleet size per period, comma separated",
+  // Settings of the run and its playback rather than of the fleet itself.
+  ["simulation_step_sec",  "int",    "", { modes: RUNNABLE }],
+  ["animation_agents",     "int",    "How many agents animation.html loads",
+                                     { modes: RUNNABLE }],
+
+  // How the fleet runs: its size and period, then the trip and swap rules each
+  // vehicle follows. Held back like any heading until a field under it renders.
+  "Fleet",
+  ["agents",              "ints",   "Fleet size per period, comma separated",
                                      { modes: RUNNABLE }],
   ["start_time",           "datetime", "First timestep of the simulated period",
                                      { modes: RUNNABLE }],
   ["end_time",             "datetime", "Last timestep; the period is start to end",
-                                     { modes: RUNNABLE }],
-  ["animation_agents",     "int",    "How many agents animation.html loads",
                                      { modes: RUNNABLE }],
   // Only hail-rank chooses between hailing and a rank; the branch that reads
   // this is inside `if SIM_MODE == HAIL_RANK`.
@@ -368,7 +407,6 @@ const FIELDS = [
   // (distribution). Demand-model destinations are given, so it cannot apply.
   ["passenger_min_dist",   "int",    "Shortest fare, metres (0 for none)",
                                      { modes: ["hail_rank", "distribution"] }],
-  ["simulation_step_sec",  "int",    "", { modes: RUNNABLE }],
   // Sizes the search ball in hail-rank and converts drawn road distances to
   // straight lines in distribution. Demand model needs neither. Kept in
   // calibration because measure_deviation_factor.py reads it, to report what
@@ -429,12 +467,6 @@ const SELECTS = { mode: SIM_MODES, strategy: CHARGE_STRATEGIES };
 // A bare string in FIELDS is a heading, not a field, so it has no options.
 const FIELD_OPTS = new Map(FIELDS.filter(Array.isArray)
                                  .map(([key, , , opts]) => [key, opts || {}]));
-
-// Neither is the panel's business: "note" is prose for whoever opens the file,
-// and sync_evtracs belongs to the EV-TRACS integration. Hidden rather than made
-// editable, and untouched on save -- the server merges into the file it read,
-// so a key the editor never sends survives.
-const HIDDEN_KEYS = new Set(["note", "sync_evtracs"]);
 
 // A scenario is identified by "<root>/<file>.json". Each segment is encoded
 // separately so the slash stays a slash: encodeURIComponent on the whole id
@@ -519,10 +551,9 @@ function renderEditor() {
   const cfg = SCENARIO.config;
   const rows = [];
 
-  // Keys the editor actually put a control on. Anything else in the file goes
-  // in the read-only list below -- including a field skipped here because the
-  // mode does not use it, which is still in the file and still saved.
-  const shown = new Set();
+  // Keys without a control here -- unlisted ones, and fields the mode does not
+  // use -- are left off the panel entirely. They are still in the file and
+  // still saved, because the server merges into the file it read.
 
   const mode = currentMode();
   // A heading is held back until something under it actually renders, so a
@@ -539,21 +570,6 @@ function renderEditor() {
     if (absent && opts.whenAbsent === undefined) continue;
     if (heading) { rows.push(`<div class="group-label">${heading}</div>`); heading = null; }
     rows.push(fieldRow(key, type, absent ? opts.whenAbsent : cfg[key], help, absent));
-    shown.add(key);
-  }
-
-  const unknown = Object.keys(cfg)
-    .filter(k => !shown.has(k) && !HIDDEN_KEYS.has(k));
-  if (unknown.length) {
-    rows.push(`<div class="group-label">not editable here &mdash; preserved on save</div>`);
-    for (const k of unknown) {
-      const preview = JSON.stringify(cfg[k]);
-      rows.push(`<div class="row-item is-readonly">
-          <span class="mono">${k}</span>
-          <span class="row-note mono">${
-            preview.length > 30 ? preview.slice(0, 30) + "…" : preview}</span>
-        </div>`);
-    }
   }
   $("#editor").innerHTML = rows.join("");
 
@@ -758,7 +774,10 @@ function renderBoard() {
     const items = byStage[stage] || [];
     return `<div class="group-label">${stageLabel(stage)}</div>` + items.map(a => `
       <div class="row-item" title="${a.path}">
-        <span><span class="dot dot-${a.status}"></span>${a.label}</span>
+        <span class="me-2">
+          <span class="d-block"><span class="dot dot-${a.status}"></span>${a.label}</span>
+          ${outputLinks(a)}
+        </span>
         <span class="row-note">
           ${describe(a)}
         </span>
@@ -787,37 +806,12 @@ async function loadTasks() {
   renderTasks();
 }
 
-// Everything a task has already written that can be opened or saved: the
-// figures and files the task itself declares, plus the ones hanging off the
-// artefacts it produces. The second half used to be rendered on the pipeline
-// board instead, which split one job's outputs across two panes -- the charge
-// profile drew its PNGs onto the board row and its total_load download onto
-// the task row. They all belong against the job that wrote them.
-//
-// Merged here rather than in the registry because the two declarations answer
-// different questions -- which figures a task draws, and which figures belong
-// to an artefact -- and both stay true whatever the panel does with them.
-function taskOutputs(t) {
-  const artefacts = (SCENARIO && SCENARIO.artefacts) || [];
-  const gather = (taskKey, artefactKey) => {
-    const declared = (SCENARIO && SCENARIO[taskKey] && SCENARIO[taskKey][t.id]) || [];
-    const inherited = artefacts.filter(a => a.produced_by === t.id)
-                               .flatMap(a => a[artefactKey] || []);
-    // Deduped by url: charge_profile declares the same two PNGs on the task
-    // and on the artefact it writes, and a row carrying each button twice is
-    // worse than either half on its own.
-    const seen = new Set();
-    return [...declared, ...inherited].filter(f => !seen.has(f.url) && seen.add(f.url));
-  };
-  return { previews: gather("task_previews", "previews"),
-           downloads: gather("task_downloads", "downloads") };
-}
-
-// The buttons for those outputs, on the task's own row. Rendered only for what
-// is actually on disk, which is also why this is per-scenario rather than baked
-// into the task list fetched once at start-up.
-function outputLinks(t) {
-  const { previews, downloads } = taskOutputs(t);
+// The figures and files an artefact's job wrote, under its name on the board.
+// They used to sit on the task row instead, which put a job's outputs a pane
+// away from the file they belong to and its staleness. The server only lists
+// what is on disk, and only while the artefact itself is.
+function outputLinks(a) {
+  const previews = a.previews || [], downloads = a.downloads || [];
   if (!previews.length && !downloads.length) return "";
   return `<span class="d-block mt-1">${previewButtons(previews, "me-1")}`
        + `${downloadButtons(downloads, "me-1")}</span>`;
@@ -848,14 +842,15 @@ function previewButtons(shots, spacing) {
 // Data files meant to leave the model, beside the figures. Labelled with the
 // filename rather than "Download": total_load.csv and total_load.zip are the
 // same button on different scenarios, and which one you got is the thing worth
-// saying. The download attribute is what makes the browser save it to the
+// saying. The artefact's own file is the exception -- the server labels it
+// CSV or XLSX, since its name is already printed just above. The download attribute is what makes the browser save it to the
 // downloads folder instead of showing a zip's bytes, or a csv, in a new tab.
 function downloadButtons(files, spacing) {
   if (!files || !files.length) return "";
   return files.map(f =>
     `<a class="btn btn-sm btn-outline-primary ${spacing} py-0"
         href="${f.url}" download="${f.name}"
-        title="Download ${f.name}">&darr; ${f.name}</a>`).join("");
+        title="Download ${f.name}">&darr; ${f.label || f.name}</a>`).join("");
 }
 
 // Split from loadTasks so switching scenario re-filters without re-fetching.
@@ -885,7 +880,6 @@ function renderTasks() {
               ? '<span class="ap-pill is-error ms-1">terminal only</span>' : ""}
           </span>
           <span class="row-note">${t.description}</span>
-          ${outputLinks(t)}
         </span>
         <button class="btn btn-sm ${t.runnable ? "btn-primary" : "btn-secondary"}"
                 data-task="${t.id}" ${t.runnable ? "" : "disabled"}

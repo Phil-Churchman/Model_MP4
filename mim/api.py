@@ -202,8 +202,19 @@ def artefact_status(scenario):
                             for f in (art.downloads if exists else ()))
             if os.path.exists(full)]
 
+        # The artefact's own file, when it is a table someone would open
+        # elsewhere. Labelled by type rather than name: the row already says
+        # the name, directly above the button.
+        ext = os.path.splitext(path)[1].lower()
+        if (exists and os.path.isfile(path)
+                and (art.downloadable or ext in task_registry.DOWNLOADABLE)):
+            entry["downloads"].insert(0, {"name": os.path.basename(path),
+                                          "label": ext[1:].upper(),
+                                          "url": served_url(path)})
+
         if exists:
             entry["modified"] = int(_newest_mtime(path))
+            entry["started"] = int(task_registry.oldest_mtime(path))
             if os.path.isdir(path):
                 entry["count"] = sum(1 for _ in os.scandir(path))
             else:
@@ -231,7 +242,7 @@ def artefact_status(scenario):
         # unchanged inputs leaves every depends_on older than both files.
         reference = found.get(art.same_run_as) if art.same_run_as else None
         if reference and reference.get("exists"):
-            behind = reference["modified"] - entry["modified"]
+            behind = reference["started"] - entry["modified"]
             if behind > task_registry.SAME_RUN_TOLERANCE_S:
                 newer.append(f"{reference['label']} "
                              f"({_age(behind)} newer)")
@@ -280,21 +291,6 @@ def get_scenario(name: str):
         # /api/tasks is fetched once and knows nothing about the selection.
         "task_available": {t.id: t.is_available(s)
                            for t in task_registry.TASKS},
-        # Figures a task has already drawn for THIS scenario, so the panel can
-        # link straight to them. Only ones on disk: a button that 404s is worse
-        # than no button.
-        "task_previews": {
-            t.id: [{"name": os.path.basename(f),
-                    "url": served_url(task_registry.scenario_path(s, f))}
-                   for f in t.existing_previews(s)]
-            for t in task_registry.TASKS},
-        # Data files a task has written for use outside the model, on the same
-        # terms: only what is on disk, and named so the row can say which.
-        "task_downloads": {
-            t.id: [{"name": os.path.basename(f),
-                    "url": served_url(task_registry.scenario_path(s, f))}
-                   for f in t.existing_downloads(s)]
-            for t in task_registry.TASKS},
     }
 
 

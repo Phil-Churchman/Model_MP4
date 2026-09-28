@@ -9,6 +9,7 @@ import json
 import pandas as pd
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 from tqdm import tqdm
 import numpy as np
 
@@ -123,27 +124,24 @@ def main():
 
     total_arrivals = df.sum()
     busiest_ids = total_arrivals.sort_values(ascending=False).index[:3]
-    time_numeric = np.arange(len(df))
+    # Bars on the real bin times, so the date axis can space its own labels.
+    # A label every 8 bins (2 hours) suited a one-day run and put ~370
+    # overlapping labels on a month-long one.
+    bar_width = timedelta(minutes=TIME_BIN_MINUTES * 0.8)
 
     for idx, s in enumerate(swap_stations):
         ax = flat_axes[idx]
         s_id = s["id"]
         color = 'orange' if s_id in busiest_ids else 'steelblue'
 
-        ax.bar(time_numeric, df[s_id], width=0.8, color=color)
+        ax.bar(df.index, df[s_id], width=bar_width, align="edge", color=color)
         ax.set_title(f"Station {s_id} ({s['posts']} Posts)", fontsize=14, fontweight='bold')
 
-        # X-axis logic
-        xticks = np.arange(0, len(df), 8)
-        xticklabels = [(START_TIME + timedelta(minutes=i * TIME_BIN_MINUTES)).strftime("%I%p").lstrip("0") for i in range(0, len(df), 8)]
-
-        # Only show x-labels on the bottom-most row
-        if idx >= num_stations - cols:
-            ax.set_xticks(xticks)
-            ax.set_xticklabels(xticklabels)
-        else:
-            ax.set_xticks(xticks)
-            ax.set_xticklabels([])
+        # sharex already leaves the labels to the bottom row only.
+        locator = mdates.AutoDateLocator(minticks=4, maxticks=10)
+        ax.xaxis.set_major_locator(locator)
+        ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+        ax.set_xlim(START_TIME, END_TIME)
 
     # Remove unused axes if more than one column and an odd number of stations
     for idx in range(num_stations, len(flat_axes)):
@@ -154,7 +152,7 @@ def main():
 
     plt.tight_layout(rect=[0.05, 0.03, 1, 0.93])
     plt.savefig(writable_path(FIG_OUTPUT), dpi=300)
-    plt.show()
+    # plt.show()
 
 
 if __name__ == "__main__":
