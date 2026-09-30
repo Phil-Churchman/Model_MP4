@@ -35,7 +35,7 @@ dashboard that shows the whole pipeline and what in it is out of date.
 | `swap_station_location/`, `taxi_rank_download/` | Standalone studies: siting swap stations, and collecting taxi rank locations |
 | `scenarios_shared/` | Scenario files and their input folders, version-controlled |
 | `scenarios_private/` | The same, for scenarios that stay off the repo (git-ignored) |
-| `scenarios_output/` | Every scenario's results (git-ignored — a run rebuilds them) |
+| `scenarios_output/` | Every scenario's results, in `shared/` and `private/` to match (git-ignored — a run rebuilds them) |
 
 ---
 
@@ -104,7 +104,7 @@ A scenario is one JSON file plus two folders:
 scenarios_shared/scenario_accra.json     the settings
 scenarios_shared/accra/geojson_files/    the inputs  (area, roads, stations, demand)
 scenarios_shared/accra/captured_locations/   raw GPS, for calibration scenarios
-scenarios_output/accra/                  the results
+scenarios_output/shared/accra/           the results
 ```
 
 The file says where those folders are:
@@ -112,21 +112,32 @@ The file says where those folders are:
 ```json
 {
   "folder_name":   "scenarios_shared/accra",
-  "output_folder": "scenarios_output/accra",
+  "output_folder": "scenarios_output/shared/accra",
   "simulation_mode": "distribution",
   "start_time": [2025, 1, 1, 0, 0, 0],
   "end_time":   [2025, 1, 2, 0, 0, 0],
   "agents": [0, 0, 200, 400, 800, 1000, ...],
   "max_total_distance_m": 70000,
-  "charge_rate": 1.2,
-  "total_charge_slots": 8
+  "charge_rate": 1.2
 }
 ```
+
+What is particular to each swap station lives with the station, in
+`swap_stations.geojson`: `posts` (vehicles it can swap at once) and
+`charge_slots` (batteries it can charge at once), both set in the stations
+editor. `charge_slots` was once a single scenario-wide `total_charge_slots`;
+an older scenario file that still has one is used as the fallback for any
+station without its own.
 
 Both paths are relative to the `Model` folder. Results are kept outside the
 scenario folder so a scenario can be shared without dragging several hundred MB
 of output along with it; a file with no `output_folder` falls back to the older
 `<folder_name>/output` layout and still works.
+
+Results are split into `scenarios_output/shared/` and `scenarios_output/private/`
+by where the scenario file lives, because the same scenario name can be used in
+both — and two scenarios writing to one output folder would each delete the
+other's results on every run. The dashboard's copy button follows this.
 
 `scenarios_private/` is for scenarios you do not want on the repo. It and
 `scenarios_output/` are both git-ignored. The dashboard picker reads scenario
@@ -231,9 +242,14 @@ or directly, in which case they use `scenario.json`.
 | `tracker_data_processing/clean_data_animation.html` | Replays captured GPS after cleaning |
 | `tracker_data_processing/view_cleaned_data.html` | Inspect cleaned traces against the raw capture |
 
-The editors save through the browser — either a download or a save dialog — so
-you choose where the file lands. They cannot write into the scenario folder by
-themselves.
+Opened from the dashboard, each editor has a **Save to scenario** button that
+writes its file straight back into the scenario's `geojson_files/`. It lights up
+once something has changed, and closing the tab with unsaved changes asks first.
+The version it replaces is kept as `<name>.previous.<ext>`, one save deep, and a
+save is refused if the file changed on disk after the editor loaded it. Only the
+five editable inputs can be written this way — never `roads.graphml`. Saving
+needs `run_server.py`; under Live Server, or opened on `scenario.json`, the
+editors still export through a download or save dialog as before.
 
 ---
 

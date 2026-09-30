@@ -334,33 +334,38 @@ def road_speeds_candidates(scenario):
     return data_file_candidates(scenario, ROAD_SPEEDS_FILENAME)
 
 
-def load_road_speeds(scenario, path=None, export=False):
+def load_road_speeds(scenario, path=None, export=False, use_scenario_key=True):
     """
-    Return ``(speeds_km_h, source)`` -- the highway-type speed table, and a
-    human-readable note saying where it came from.
+    Return ``(speeds_km_h, source)`` -- the highway-type speed table, and the
+    path of the file it came from.
 
-    Speeds used to live in the scenario file under "road_speed_km-h". They are
-    calibrated output, not scenario description: the same city re-calibrated
-    gives a different table, and every scenario over the same city should share
-    it. So they now live in their own file, looked up in this order:
+    Speeds are calibrated output rather than scenario description: the same
+    city re-calibrated gives a different table, and every scenario over the
+    same city should normally share it. A scenario can still be customised --
+    the road speeds viewer writes its own table into the scenario file -- and
+    when it is, that table is what it runs with. Looked up in this order:
 
         1. ``path``, or the MIM_ROAD_SPEEDS environment variable
-        2. <scenario folder>/road_speeds.json      -- per-scenario override
-        3. <Model>/road_speeds.json                -- shared across scenarios
-        4. <Model>/Simulation/road_speeds.json     -- where the file sits today
-        5. the scenario file's own "road_speed_km-h"   (legacy fallback)
+        2. the scenario file's own "road_speed_km-h"  -- customised speeds
+        3. <scenario folder>/road_speeds.json         -- per-scenario override
+        4. <Model>/road_speeds.json                   -- shared across scenarios
+        5. <Model>/Simulation/road_speeds.json        -- the shared default
 
-    Step 5 exists so scenarios that were never migrated keep running, but it is
-    announced rather than silent: routing weights that differ between two
-    scripts produce results that look plausible and are wrong, which is a much
-    more expensive failure than a noisy line of output.
+    The scenario key was once the last resort, a fallback for files never
+    migrated. It comes second now because it is how a scenario is customised,
+    and a customisation that lost to the shared default would be silently
+    ignored -- routing on speeds other than the ones on screen.
 
-    The file may be either ``{"road_speed_km-h": {...}}`` (matching the scenario
-    key it replaces) or a bare ``{highway: km_h}`` mapping.
+    ``use_scenario_key=False`` skips step 2: what the scenario would run with
+    if its customisation were removed, which is what "reset" goes back to.
+
+    A file may be either ``{"road_speed_km-h": {...}}`` or a bare
+    ``{highway: km_h}`` mapping.
 
     ``export=True`` publishes the resolved path in the environment, so workers
     spawned by multiprocessing resolve to the same table -- the same reason
-    load_scenario takes the flag.
+    load_scenario takes the flag. Speeds from the scenario key need no export:
+    workers load the same scenario file and find them the same way.
     """
     path = path or os.environ.get(ROAD_SPEEDS_ENV_VAR) or None
     if path:
@@ -371,20 +376,20 @@ def load_road_speeds(scenario, path=None, export=False):
             raise SystemExit(f"Road speeds file not found: {path}")
         found = path
     else:
+        own = scenario.cfg.get(ROAD_SPEEDS_KEY) if use_scenario_key else None
+        if own:
+            # Not printed here: the simulation's worker processes all call this
+            # at import, so a line here appears once per worker. Callers report
+            # the source they got back instead.
+            return _validate_road_speeds(own, scenario.path), scenario.path
         found = next((p for p in road_speeds_candidates(scenario)
                       if os.path.exists(p)), None)
 
     if found is None:
-        speeds = scenario.cfg.get(ROAD_SPEEDS_KEY)
-        if not speeds:
-            looked = " | ".join(road_speeds_candidates(scenario))
-            raise SystemExit(
-                f"No road speeds found. Looked for {ROAD_SPEEDS_FILENAME} at: "
-                f"{looked} -- and for the legacy key in {scenario.path}.")
-        source = f"{scenario.path} (legacy key)"
-        print(f"  road speeds: no {ROAD_SPEEDS_FILENAME} found; "
-              f"falling back to {source}")
-        return _validate_road_speeds(speeds, source), source
+        looked = " | ".join(road_speeds_candidates(scenario))
+        raise SystemExit(
+            f"No road speeds found. Looked for {ROAD_SPEEDS_FILENAME} at: "
+            f"{looked} -- and for {ROAD_SPEEDS_KEY!r} in {scenario.path}.")
 
     with open(found, "r", encoding="utf-8") as f:
         data = json.load(f)

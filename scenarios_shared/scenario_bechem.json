@@ -1,6 +1,6 @@
 {
   "folder_name": "scenarios_shared/bechem",
-  "output_folder": "scenarios_output/bechem",
+  "output_folder": "scenarios_output/shared/bechem",
   "sync_evtracs": true,
   "simulation_mode": "demand_model",
   "speed_based_routing": true,
@@ -23,6 +23,5 @@
   "charge_strategy": "immediate",
   "charge_window_start": [8,0],
   "charge_window_end": [16,0],
-  "total_charge_slots": 8,
   "charge_slot_switch_time": 600
 }

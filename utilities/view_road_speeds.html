@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Road Speeds</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+<!-- Apple-style design layer. Must load after bootstrap so it can override its
+     custom properties. Relative href so the page works under both servers. -->
+<link href="../web/css/apple.css" rel="stylesheet">
+<style>
+  body { background: var(--ap-bg); padding: 2rem 1rem 4rem; }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  .note { color: var(--ap-ink-4); font-size: .85rem; }
+  .mono { font-family: var(--ap-font-mono); }
+  table { font-size: .9rem; }
+  th[data-sort] { cursor: pointer; user-select: none; white-space: nowrap; }
+  th[data-sort]::after { content: " \2195"; color: var(--ap-ink-4); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .bar { height: .5rem; border-radius: .25rem; background: var(--ap-blue); min-width: 1px; }
+  tr.excluded td { color: var(--ap-ink-4); }
+  tr.excluded .bar { background: var(--ap-fill-hover); }
+  tr.changed td:first-child { box-shadow: inset 3px 0 0 var(--ap-orange); }
+  .speed-input { width: 5.5rem; margin-left: auto; text-align: right; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h2 class="mb-1">Road speeds</h2>
+  <div id="scenarioLabel" class="note mb-3"></div>
+
+  <div class="card mb-3"><div class="card-body py-2" id="source"></div></div>
+
+  <div id="actions" class="d-flex flex-wrap align-items-center gap-2 mb-3"></div>
+
+  <div class="card"><div class="card-body">
+    <table class="table table-sm align-middle mb-0">
+      <thead><tr>
+        <th data-sort="type">Road type</th>
+        <th data-sort="km_h" class="num">km/h</th>
+        <th style="width:30%"></th>
+        <th data-sort="edges" class="num">Edges in this network</th>
+      </tr></thead>
+      <tbody id="rows"><tr><td colspan="4" class="note">Loading…</td></tr></tbody>
+    </table>
+    <div id="addRow" class="d-none mt-3">
+      <div class="input-group input-group-sm" style="max-width:26rem">
+        <input id="addType" class="form-control mono" placeholder="road type, e.g. elevator">
+        <input id="addSpeed" class="form-control" type="number" min="0" max="200" step="1"
+               placeholder="km/h" style="max-width:6rem">
+        <button id="addBtn" class="btn btn-outline-primary">Add road type</button>
+      </div>
+    </div>
+  </div></div>
+
+  <div id="unlisted" class="mt-3"></div>
+</div>
+
+<script>
+// Which scenario to show. The control panel links here with ?scenario=<id>;
+// anything else is refused rather than followed wherever a query string points.
+function scenarioFile() {
+  const asked = new URLSearchParams(location.search).get("scenario") || "";
+  return /^scenarios_(shared|private)\/scenario[\w .-]*\.json$/i.test(asked) ? asked : null;
+}
+const SCENARIO_FILE = scenarioFile();
+const API = `/api/road-speeds?scenario=${encodeURIComponent(SCENARIO_FILE || "")}`;
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+
+let DATA = null;            // as last loaded from, or saved to, the server
+let EDIT = {};              // type -> km/h on screen, when customised
+let SORT = { key: "km_h", desc: true };
+
+const saved = () => Object.fromEntries(DATA.rows.map(r => [r.type, r.km_h]));
+function isDirty() {
+  if (!DATA || !DATA.customised) return false;
+  const a = saved();
+  return Object.keys(EDIT).length !== Object.keys(a).length
+      || Object.entries(EDIT).some(([k, v]) => a[k] !== v);
+}
+
+async function call(method, url, body) {
+  const res = await fetch(url, { method, headers: { "Content-Type": "application/json" },
+                                 body: body ? JSON.stringify(body) : undefined });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+  return data;
+}
+
+function loaded(data) {
+  DATA = data;
+  EDIT = data.customised ? saved() : {};
+  renderSource(); renderActions(); render(); renderUnlisted();
+}
+
+// ---------- rendering ----------
+function renderSource() {
+  const net = DATA.network
+    ? `This scenario's network has ${DATA.network.edges.toLocaleString()} edges.`
+    : "This scenario has no roads.graphml yet, so there are no edge counts.";
+  const when = `Speeds take effect on the next simulation run. Changing a type to or
+    from 0 km/h changes which roads are kept only when the roads are next downloaded.`;
+  $("#source").innerHTML = DATA.customised
+    ? `<div><span class="ap-pill is-info me-1">Customised</span> for this scenario, in
+         <span class="mono">${esc(DATA.source)}</span></div>
+       <div class="note">Reset returns it to <span class="mono">${esc(DATA.default_source || "the default")}</span>.
+         ${when} ${net}</div>`
+    : `<div>Default speeds, from <span class="mono">${esc(DATA.source)}</span></div>
+       <div class="note">${DATA.shared
+          ? "The shared table, used by every scenario that has not been customised."
+          : "Used by this scenario, from its own folder."}
+         Customise to give this scenario speeds of its own. ${net}</div>`;
+}
+
+function renderActions() {
+  const a = $("#actions");
+  if (!DATA.customised) {
+    a.innerHTML = `<button id="customiseBtn" class="btn btn-primary btn-sm">Customise for this scenario</button>
+      <span class="note">Copies these ${DATA.rows.length} speeds into
+        <span class="mono">${esc(SCENARIO_FILE)}</span> to edit there.</span>`;
+    $("#customiseBtn").onclick = customise;
+  } else {
+    a.innerHTML = `<button id="saveBtn" class="btn btn-success btn-sm">Save</button>
+      <button id="discardBtn" class="btn btn-secondary btn-sm">Discard changes</button>
+      <span id="state" class="note"></span>
+      <button id="resetBtn" class="btn btn-outline-danger btn-sm ms-auto">Reset to default speeds</button>`;
+    $("#saveBtn").onclick = save;
+    $("#discardBtn").onclick = () => { EDIT = saved(); render(); };
+    $("#resetBtn").onclick = reset;
+  }
+  $("#addRow").classList.toggle("d-none", !DATA.customised);
+  refreshState();
+}
+
+function refreshState(msg) {
+  if (!DATA || !DATA.customised) return;
+  const d = isDirty();
+  $("#saveBtn").disabled = $("#discardBtn").disabled = !d;
+  $("#state").textContent = msg || (d ? "unsaved changes" : "");
+}
+
+function render() {
+  const custom = DATA.customised;
+  const counts = Object.fromEntries(DATA.rows.map(r => [r.type, r.edges]));
+  (DATA.unlisted || []).forEach(u => counts[u.type] = u.edges);
+  const rows = Object.entries(custom ? EDIT : saved())
+    .map(([type, km_h]) => ({ type, km_h, edges: counts[type] || 0 }))
+    .sort((a, b) => {
+      const x = a[SORT.key], y = b[SORT.key];
+      const c = typeof x === "string" ? x.localeCompare(y) : x - y;
+      return SORT.desc ? -c : c;
+    });
+  const top = Math.max(...rows.map(r => r.km_h), 1);
+  const total = DATA.network ? DATA.network.edges : 0;
+  const was = saved();
+  $("#rows").innerHTML = rows.map(r => {
+    const off = r.km_h === 0;
+    // Absent from a network that exists is a count of 0, not an unknown.
+    const edges = !DATA.network ? "&ndash;"
+      : !r.edges ? '<span class="note">0</span>'
+      : `${r.edges.toLocaleString()}<span class="note"> (${(100 * r.edges / total).toFixed(1)}%)</span>`;
+    const speed = custom
+      ? `<input type="number" class="form-control form-control-sm speed-input" min="0" max="200"
+               step="1" value="${r.km_h}" data-type="${esc(r.type)}">`
+      : r.km_h;
+    return `<tr class="${off ? "excluded" : ""} ${custom && was[r.type] !== r.km_h ? "changed" : ""}">
+      <td class="mono">${esc(r.type)}${off ? ' <span class="ap-pill ms-1">excluded</span>' : ""}</td>
+      <td class="num">${speed}</td>
+      <td><div class="bar" style="width:${100 * r.km_h / top}%"></div></td>
+      <td class="num">${edges}</td>
+    </tr>`;
+  }).join("");
+  document.querySelectorAll(".speed-input").forEach(inp => inp.onchange = () => {
+    const v = Number(inp.value);
+    if (inp.value === "" || !Number.isFinite(v) || v < 0 || v > 200) {
+      inp.classList.add("is-invalid"); return;
+    }
+    EDIT[inp.dataset.type] = v;
+    render();
+  });
+  refreshState();
+}
+
+function renderUnlisted() {
+  const u = DATA.unlisted || [];
+  $("#unlisted").innerHTML = !u.length ? "" : `<div class="card"><div class="card-body">
+    <div class="mb-2"><strong>In the network but not in the table</strong>
+      <span class="note d-block">These have no speed, so routing cannot use them.</span></div>
+    ${u.map(x => `<div class="d-flex justify-content-between">
+        <span class="mono">${esc(x.type)}</span><span>${x.edges.toLocaleString()} edges</span></div>`).join("")}
+  </div></div>`;
+}
+
+document.querySelectorAll("th[data-sort]").forEach(th => th.onclick = () => {
+  const key = th.dataset.sort;
+  SORT = { key, desc: SORT.key === key ? !SORT.desc : key !== "type" };
+  render();
+});
+
+// ---------- actions ----------
+async function customise() {
+  $("#customiseBtn").disabled = true;
+  try {
+    loaded(await call("POST", API.replace("/api/road-speeds", "/api/road-speeds/customise"),
+                      { mtime: DATA.mtime }));
+  } catch (e) { alert(`Not customised: ${e.message}`); $("#customiseBtn").disabled = false; }
+}
+
+async function save() {
+  $("#saveBtn").disabled = true;
+  try {
+    loaded(await call("PUT", API, { speeds: EDIT, mtime: DATA.mtime }));
+    refreshState(`saved ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`);
+  } catch (e) { alert(`Not saved: ${e.message}`); refreshState(); }
+}
+
+async function reset() {
+  if (!confirm(`Reset ${SCENARIO_FILE} to the default road speeds?\n\n`
+             + `Its customised speeds are removed from the scenario file and it goes back to `
+             + `${DATA.default_source || "the default table"}.`
+             + (isDirty() ? "\n\nUnsaved changes on this page are lost too." : ""))) return;
+  try {
+    loaded(await call("DELETE", `${API}&mtime=${DATA.mtime}`));
+  } catch (e) { alert(`Not reset: ${e.message}`); }
+}
+
+$("#addBtn").onclick = () => {
+  const type = $("#addType").value.trim(), v = Number($("#addSpeed").value);
+  if (!/^[A-Za-z0-9_]+$/.test(type)) { $("#addType").classList.add("is-invalid"); return; }
+  if ($("#addSpeed").value === "" || !Number.isFinite(v) || v < 0 || v > 200) {
+    $("#addSpeed").classList.add("is-invalid"); return;
+  }
+  if (type in EDIT) { alert(`${type} is already in the table.`); return; }
+  EDIT[type] = v;
+  $("#addType").value = $("#addSpeed").value = "";
+  $("#addType").classList.remove("is-invalid"); $("#addSpeed").classList.remove("is-invalid");
+  render();
+};
+
+window.addEventListener("beforeunload", e => {
+  if (isDirty()) { e.preventDefault(); e.returnValue = ""; }
+});
+
+(async () => {
+  if (!SCENARIO_FILE) {
+    $("#rows").innerHTML = `<tr><td colspan="4" class="note">Open this page from the
+      control panel's HTML Tools, so it knows which scenario to show.</td></tr>`;
+    return;
+  }
+  $("#scenarioLabel").textContent = SCENARIO_FILE;
+  try {
+    loaded(await call("GET", API));
+  } catch (e) {
+    // Live Server serves the page but has no /api; only run_server.py does.
+    $("#rows").innerHTML = `<tr><td colspan="4" class="text-danger">Could not load road
+      speeds: ${esc(e.message)}. This page needs the model server (run_server.py).</td></tr>`;
+  }
+})();
+</script>
+</body>
+</html>

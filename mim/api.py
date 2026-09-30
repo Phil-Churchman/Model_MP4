@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scenario_config import MODEL_DIR, load_scenario, write_scenario
+from scenario_config import MODEL_DIR, load_scenario, write_scenario, load_road_speeds
 
 from . import tasks as task_registry
 from .jobs import JobManager
@@ -426,6 +426,8 @@ COPY_ALWAYS = ["geojson_files", "captured_locations"]
 # inside the scenario folder. One that has an "output_folder" has its results
 # somewhere else entirely, and they are copied separately below.
 COPY_ON_REQUEST = ["output"]
+# Which half of scenarios_output/ a scenario folder's results belong in.
+OUTPUT_HALVES = {"scenarios_shared": "shared", "scenarios_private": "private"}
 
 
 def _slug(name):
@@ -483,8 +485,21 @@ def copy_scenario(name: str, payload: dict):
     # beside the original's -- and needs it whether or not the existing results
     # come along, because a copy left pointing at the original's output folder
     # would write its next run straight over the original's results.
-    dest_output = (os.path.join(os.path.dirname(src.output_dir), new_name)
-                   if src.output_folder else None)
+    #
+    # Results are split by the scenario file's folder -- scenarios_output/shared
+    # and scenarios_output/private -- because the same name can be used in
+    # both, and two scenarios sharing an output folder delete each other's
+    # results every run. Named from where the copy's file lands rather than
+    # from the original's output path, so a copy lands in the right half even
+    # if the original was never moved into one. Anything else keeps the older
+    # rule: beside the original's results.
+    output_half = OUTPUT_HALVES.get(os.path.basename(os.path.dirname(src_path)))
+    if not src.output_folder:
+        dest_output = None
+    elif output_half:
+        dest_output = os.path.join(MODEL_DIR, "scenarios_output", output_half, new_name)
+    else:
+        dest_output = os.path.join(os.path.dirname(src.output_dir), new_name)
 
     if os.path.exists(dest_scenario):
         raise HTTPException(409, f"{scenario_file} already exists")
@@ -550,6 +565,435 @@ def copy_scenario(name: str, payload: dict):
         "skipped": skipped,
         "size_mb": round(size / 1e6, 1),
     }
+
+
+# ============================================================
+# NEW SCENARIO
+# ============================================================
+
+def _new_scenario_plan(name, root):
+    """
+    Where a new scenario called `name` in `root` would go, and what stops it.
+
+    Laid out as a copy is: scenario_<slug>.json in the root, an inputs folder
+    named as typed beside it, and results in the matching half of
+    scenarios_output/. Every one of the three must be free -- a leftover
+    results folder would put an old run's files under a new scenario's name.
+    The same name in the OTHER root is allowed (results are split by root) but
+    reported, since two scenarios called one thing is easy to mix up.
+    """
+    name = str(name or "").strip()
+    if root not in SCENARIO_ROOTS:
+        raise HTTPException(400, f"root must be one of {', '.join(SCENARIO_ROOTS)}")
+    problems = []
+    if not name:
+        problems.append("A name is required")
+    elif re.search(r'[\\/:*?"<>|]', name):
+        problems.append('A name cannot contain \\ / : * ? " < > |')
+    elif name.startswith("."):
+        problems.append("A name cannot start with a dot")
+    file = f"scenario_{_slug(name)}.json"
+    rel = {"file": f"{root}/{file}", "folder": f"{root}/{name}",
+           "output": f"scenarios_output/{OUTPUT_HALVES[root]}/{name}"}
+    if not problems:
+        for what, label in (("file", "Scenario file"), ("folder", "Inputs folder"),
+                            ("output", "Results folder")):
+            if os.path.exists(os.path.join(MODEL_DIR, rel[what])):
+                problems.append(f"{label} already exists: {rel[what]}")
+    other = next(r for r in SCENARIO_ROOTS if r != root)
+    in_other = bool(name) and not problems and (
+        os.path.exists(os.path.join(MODEL_DIR, other, file))
+        or os.path.exists(os.path.join(MODEL_DIR, other, name)))
+    return name, rel, problems, (other if in_other else None)
+
+
+@app.get("/api/new-scenario/check")
+def check_new_scenario(name: str = "", root: str = "scenarios_shared"):
+    """The panel's live check while a name is typed. Creating re-checks."""
+    _, rel, problems, other = _new_scenario_plan(name, root)
+    return {"ok": not problems, "problems": problems, "paths": rel,
+            "also_in": other}
+
+
+@app.post("/api/new-scenario")
+def create_scenario(payload: dict):
+    """
+    Create a scenario: its file, and an empty inputs folder for the editors.
+
+    Settings are taken from `template` (the scenario selected in the panel)
+    with the two paths repointed, because a file of paths alone gives the panel
+    nothing to edit and the model nothing to run. No inputs or results come
+    with them -- that is what Copy is for.
+    """
+    root = payload.get("root", "scenarios_shared")
+    name, rel, problems, _ = _new_scenario_plan(payload.get("name"), root)
+    if problems:
+        raise HTTPException(409, "; ".join(problems))
+
+    cfg = {}
+    if payload.get("template"):
+        cfg = dict(load_scenario(_scenario_path(payload["template"])).cfg)
+    cfg["folder_name"] = rel["folder"]
+    cfg["output_folder"] = rel["output"]
+    cfg.setdefault("simulation_mode", "hail_rank")
+    # folder_name and output_folder first, as in every other scenario file.
+    cfg = {"folder_name": cfg.pop("folder_name"),
+           "output_folder": cfg.pop("output_folder"), **cfg}
+
+    folder = os.path.join(MODEL_DIR, rel["folder"])
+    os.makedirs(os.path.join(folder, "geojson_files"))
+    try:
+        write_scenario(os.path.join(MODEL_DIR, rel["file"]), cfg, backup=False)
+    except OSError as e:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise HTTPException(500, f"Could not create the scenario, nothing kept: {e}")
+    return {"scenario_file": rel["file"], **rel}
+
+
+# ============================================================
+# DELETE SCENARIO
+# ============================================================
+
+def _scenario_display_name(path):
+    """The name the picker shows: the file without scenario_ and .json."""
+    return re.sub(r"\.json$", "", re.sub(r"^scenario_", "", os.path.basename(path)))
+
+
+def _is_direct_child(path, parent):
+    """Whether `path` sits exactly one level inside `parent` (not parent itself)."""
+    a = os.path.normcase(os.path.realpath(path))
+    b = os.path.normcase(os.path.realpath(parent))
+    return os.path.dirname(a) == b
+
+
+def _delete_plan(scenario):
+    """
+    What deleting a scenario would remove, and anything that should stop it.
+
+    Folders are only ever removed from the places this model puts them -- an
+    inputs folder directly inside scenarios_shared/ or scenarios_private/, a
+    results folder directly inside a half of scenarios_output/ (or the older
+    flat layout, or <folder>/output). A scenario file pointed somewhere else
+    has its file deleted and those folders left alone and reported, because a
+    folder_name of ".." would otherwise take the whole model with it.
+    """
+    path = _scenario_path(scenario)
+    s = load_scenario(path)
+    out_root = os.path.join(MODEL_DIR, "scenarios_output")
+    folder_ok = any(_is_direct_child(s.folder, os.path.join(MODEL_DIR, r))
+                    for r in SCENARIO_ROOTS)
+    output_ok = (s.output_folder is None      # old layout: inside the folder
+                 or _is_direct_child(s.output_dir, out_root)
+                 or any(_is_direct_child(s.output_dir, os.path.join(out_root, h))
+                        for h in OUTPUT_HALVES.values()))
+
+    items, left = [], []
+    items.append({"what": "Scenario file", "path": _as_relative(path),
+                  "size": os.path.getsize(path), "dir": False})
+    # The backup the panel's editor leaves beside the file on first save.
+    previous = os.path.splitext(path)[0] + ".previous.json"
+    if os.path.exists(previous):
+        items.append({"what": "Scenario file backup", "path": _as_relative(previous),
+                      "size": os.path.getsize(previous), "dir": False})
+    for what, p, ok in (("Inputs folder", s.folder, folder_ok),
+                        ("Results folder", s.output_dir,
+                         output_ok and s.output_folder is not None)):
+        if not os.path.exists(p):
+            continue
+        if ok:
+            items.append({"what": what, "path": _as_relative(p),
+                          "size": _dir_size(p), "dir": True})
+        elif not (what == "Results folder" and s.output_folder is None):
+            left.append(f"{what} {_as_relative(p)} is not where scenarios are "
+                        "kept, so it is left in place")
+
+    blockers = []
+    # Another scenario file using the same folders would lose its inputs or
+    # results with this one. scenario.json is the command-line working copy,
+    # not a scenario, so it is warned about rather than allowed to block.
+    mine = {os.path.normcase(os.path.realpath(p)) for p in (s.folder, s.output_dir)}
+    warnings = list(left)
+    for other in scenario_files() + [ACTIVE_COPY]:
+        if (not os.path.exists(other)
+                or os.path.normcase(other) == os.path.normcase(path)):
+            continue
+        try:
+            o = load_scenario(other)
+        except Exception:
+            continue
+        theirs = {os.path.normcase(os.path.realpath(p)) for p in (o.folder, o.output_dir)}
+        if mine & theirs:
+            if other == ACTIVE_COPY:
+                warnings.append("scenario.json (the command-line default) points at "
+                                "these folders and will be left pointing at nothing")
+            else:
+                blockers.append(f"{_scenario_id(other)} uses the same folders -- "
+                                "deleting this would delete its inputs or results too")
+    for job in manager.running:
+        if os.path.normcase(os.path.abspath(job.scenario_path)) == os.path.normcase(path):
+            blockers.append(f"'{job.task.label}' is running on this scenario")
+    return path, items, blockers, warnings
+
+
+@app.get("/api/delete-scenario/preview")
+def preview_delete(scenario: str):
+    path, items, blockers, warnings = _delete_plan(scenario)
+    return {"scenario": scenario, "name": _scenario_display_name(path),
+            "items": items, "blockers": blockers, "warnings": warnings,
+            "shared": scenario.startswith("scenarios_shared/")}
+
+
+def _rmtree(path):
+    """shutil.rmtree, clearing read-only flags OneDrive and git leave on Windows."""
+    def retry(func, p, _exc):
+        os.chmod(p, 0o700)
+        func(p)
+    shutil.rmtree(path, onexc=retry) if sys.version_info >= (3, 12) \
+        else shutil.rmtree(path, onerror=retry)
+
+
+@app.post("/api/delete-scenario")
+def delete_scenario(payload: dict):
+    """
+    Permanently delete a scenario: its file, inputs folder and results.
+
+    Needs the scenario's name typed back as `confirm`, checked here as well as
+    in the page so nothing calling the API can skip it. There is no undo and
+    no recycle bin -- the dialog says so before anything is sent.
+    """
+    scenario = payload.get("scenario", "")
+    path, items, blockers, _ = _delete_plan(scenario)
+    if blockers:
+        raise HTTPException(409, "; ".join(blockers))
+    if str(payload.get("confirm", "")).strip() != _scenario_display_name(path):
+        raise HTTPException(400, "Type the scenario's name exactly to confirm")
+
+    # Folders first, file last: if a folder will not go (a file open in Excel),
+    # the scenario is still listed and the delete can be retried, rather than
+    # leaving folders that nothing points at any more.
+    for item in (i for i in items if i["dir"]):
+        try:
+            _rmtree(os.path.join(MODEL_DIR, item["path"]))
+        except OSError as e:
+            raise HTTPException(500, f"Could not delete {item['path']} ({e}). "
+                                "Close anything using it and try again.")
+    for item in (i for i in items if not i["dir"]):
+        os.remove(os.path.join(MODEL_DIR, item["path"]))
+    return {"deleted": [i["path"] for i in items]}
+
+
+# ============================================================
+# ROAD SPEEDS (read only)
+# ============================================================
+
+_EDGE_COUNT_CACHE = {}
+
+
+def _highway_edge_counts(graphml):
+    """
+    Edges per highway type in a roads.graphml, cached by path and mtime.
+
+    Read with a regex rather than osmnx: the file is tens of MB and loading it
+    as a graph takes far longer than finding one attribute. An edge OSM tags
+    with several types ("['residential', 'service']") counts toward each.
+    """
+    try:
+        mtime = os.path.getmtime(graphml)
+    except OSError:
+        return None
+    hit = _EDGE_COUNT_CACHE.get(graphml)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    with open(graphml, "r", encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    key = re.search(r'<key[^>]*id="([^"]+)"[^>]*for="edge"[^>]*attr\.name="highway"', text) \
+        or re.search(r'<key[^>]*for="edge"[^>]*id="([^"]+)"[^>]*attr\.name="highway"', text)
+    counts = {}
+    if key:
+        for value in re.findall(rf'<data key="{re.escape(key.group(1))}">([^<]*)</data>', text):
+            for h in re.findall(r"[A-Za-z_]+", value) if value.startswith("[") else [value]:
+                counts[h] = counts.get(h, 0) + 1
+    _EDGE_COUNT_CACHE[graphml] = (mtime, counts)
+    return counts
+
+
+@app.get("/api/road-speeds")
+def road_speeds(scenario: str):
+    """
+    The speed table a scenario runs with, where it came from, and how much of
+    the scenario's road network each type makes up. Resolved by the same
+    load_road_speeds the simulation and road extractor call, so what is shown
+    is what is used -- including a per-scenario override if there is one.
+    """
+    path = _scenario_path(scenario)
+    s = load_scenario(path)
+    try:
+        speeds, source = load_road_speeds(s)
+    except SystemExit as e:
+        raise HTTPException(404, str(e))
+    customised = os.path.normcase(os.path.abspath(source)) == os.path.normcase(path)
+    counts = _highway_edge_counts(os.path.join(s.input_dir, "roads.graphml"))
+    shared = os.path.normcase(os.path.abspath(source)) == os.path.normcase(
+        os.path.join(MODEL_DIR, "Simulation", "road_speeds.json"))
+    # What reset would go back to, so the page can say so before it is pressed.
+    try:
+        default_source = _as_relative(load_road_speeds(s, use_scenario_key=False)[1])
+    except SystemExit:
+        default_source = None
+    rows = [{"type": h, "km_h": v, "edges": (counts or {}).get(h)}
+            for h, v in speeds.items()]
+    # Types in the network the table does not list. The extractor drops these,
+    # so normally there are none -- but a network built another way may have.
+    unlisted = sorted(((h, n) for h, n in (counts or {}).items() if h not in speeds),
+                      key=lambda x: -x[1])
+    return {
+        "source": _as_relative(source) if os.path.isabs(source) else source,
+        "shared": shared,
+        "customised": customised,
+        "default_source": default_source,
+        "mtime": os.path.getmtime(path),
+        "rows": rows,
+        "unlisted": [{"type": h, "edges": n} for h, n in unlisted],
+        "network": None if counts is None else {"edges": sum(counts.values())},
+    }
+
+
+def _write_speeds(scenario, payload, speeds):
+    """
+    Set (or, with speeds=None, remove) a scenario's own road_speed_km-h.
+
+    Written through write_scenario like the panel's own saves -- atomic, and
+    the first change keeps a .previous.json -- and refused if the file changed
+    since the page read it, so this cannot quietly undo an edit made in the
+    panel or in an editor, or be undone by one.
+    """
+    from scenario_config import ROAD_SPEEDS_KEY
+    path = _scenario_path(scenario)
+    sent = payload.get("mtime")
+    if sent is None or abs(float(sent) - os.path.getmtime(path)) > 1e-3:
+        raise HTTPException(409, "The scenario file changed since this page loaded "
+                                 "it. Reload to see the current version.")
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    if speeds is None:
+        cfg.pop(ROAD_SPEEDS_KEY, None)
+    else:
+        cfg[ROAD_SPEEDS_KEY] = speeds
+    write_scenario(path, cfg)
+    return road_speeds(scenario)
+
+
+def _clean_speeds(raw):
+    """A {type: km/h} table from the page, as numbers the model accepts."""
+    if not isinstance(raw, dict) or not raw:
+        raise HTTPException(400, "speeds must be a non-empty {road type: km/h} object")
+    out = {}
+    for k, v in raw.items():
+        k = str(k).strip()
+        if not re.fullmatch(r"[A-Za-z0-9_]+", k):
+            raise HTTPException(400, f"Road type {k!r} is not a valid OSM highway name")
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0 or v > 200:
+            raise HTTPException(400, f"{k}: speed must be a number from 0 to 200 km/h")
+        # Whole numbers stay whole, as the shared file writes them.
+        out[k] = int(v) if float(v).is_integer() else round(float(v), 2)
+    return out
+
+
+@app.post("/api/road-speeds/customise")
+def customise_road_speeds(scenario: str, payload: dict):
+    """Copy the speeds the scenario uses now into its own file, to edit there."""
+    s = load_scenario(_scenario_path(scenario))
+    speeds, _ = load_road_speeds(s)
+    return _write_speeds(scenario, payload, _clean_speeds(speeds))
+
+
+@app.put("/api/road-speeds")
+def save_road_speeds(scenario: str, payload: dict):
+    """Replace the scenario's own speeds. Only once it has been customised."""
+    s = load_scenario(_scenario_path(scenario))
+    from scenario_config import ROAD_SPEEDS_KEY
+    if not s.cfg.get(ROAD_SPEEDS_KEY):
+        raise HTTPException(409, "This scenario uses the default speeds. "
+                                 "Customise it first.")
+    return _write_speeds(scenario, payload, _clean_speeds(payload.get("speeds")))
+
+
+@app.delete("/api/road-speeds")
+def reset_road_speeds(scenario: str, mtime: float):
+    """Remove the scenario's own speeds, so it goes back to the default."""
+    return _write_speeds(scenario, {"mtime": mtime}, None)
+
+
+# ============================================================
+# INPUT FILES, SAVED BY THE EDIT TOOLS
+# ============================================================
+
+# The only files the browser editors may write, all in <folder>/geojson_files.
+# Listed rather than pattern-matched: roads.graphml lives there too, and a page
+# that could overwrite the road network would be one that could lose it.
+EDITABLE_INPUTS = ("area.geojson", "swap_stations.geojson", "taxi_ranks.geojson",
+                   "demand_points.geojson", "demand_frequencies.json")
+
+
+def _input_path(scenario, file):
+    """Where an editable input lives for a scenario id, refusing anything else."""
+    if file not in EDITABLE_INPUTS:
+        raise HTTPException(400, f"{file} cannot be saved from the browser; "
+                            f"editable files are {', '.join(EDITABLE_INPUTS)}")
+    s = load_scenario(_scenario_path(scenario))
+    return os.path.join(s.input_dir, file)
+
+
+# Under /api/scenario-inputs rather than /api/scenarios/<id>/inputs: the
+# scenario routes take the id as {name:path}, which would swallow the rest of
+# the URL and answer this request as a scenario instead.
+@app.get("/api/scenario-inputs/{file}")
+def get_input_info(file: str, scenario: str):
+    """When the file was last written, so a save can tell if it changed since."""
+    path = _input_path(scenario, file)
+    exists = os.path.exists(path)
+    return {"file": file, "exists": exists,
+            "mtime": os.path.getmtime(path) if exists else None}
+
+
+@app.post("/api/scenario-inputs/{file}")
+def save_input(file: str, scenario: str, payload: dict):
+    """
+    Write one of the editable inputs back into the scenario's input folder.
+
+    Refused with 409 if the file changed on disk after the page loaded it --
+    another tab, the area builder, a git pull -- unless the page says to
+    overwrite anyway. The version replaced is kept as <name>.previous.<ext>,
+    one deep, so the last save can always be undone by hand.
+    """
+    path = _input_path(scenario, file)
+    content = payload.get("content")
+    if not isinstance(content, str):
+        raise HTTPException(400, "content must be the file's text")
+    try:
+        json.loads(content)
+    except ValueError as e:
+        raise HTTPException(400, f"not valid JSON: {e}")
+
+    exists = os.path.exists(path)
+    sent = payload.get("mtime")
+    if exists and not payload.get("force"):
+        # Compared to the millisecond, not exactly: the mtime went out as a
+        # float through JSON and came back the same way.
+        if sent is None or abs(float(sent) - os.path.getmtime(path)) > 1e-3:
+            raise HTTPException(
+                409, f"{file} changed on disk after this page loaded it. "
+                     "Reload to see that version, or overwrite it with yours.")
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if exists:
+        stem, ext = os.path.splitext(path)
+        shutil.copy2(path, stem + ".previous" + ext)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write(content)
+    os.replace(tmp, path)   # atomic: a reader sees the old file or the new one
+    return {"file": file, "saved": True, "mtime": os.path.getmtime(path)}
 
 
 # ============================================================
@@ -647,8 +1091,8 @@ def get_job_log(job_id: int, offset: int = 0):
     job = manager.get(job_id)
     if job is None:
         raise HTTPException(404, "no such job")
-    lines, total = job.log_from(offset)
-    return {"lines": lines, "offset": total,
+    lines, start, total = job.log_from(offset)
+    return {"lines": lines, "start": start, "offset": total,
             "status": job.status, "finished": job.is_finished,
             "duration_s": job.duration_s, "returncode": job.returncode}
 

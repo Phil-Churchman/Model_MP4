@@ -175,14 +175,15 @@ TASKS = [
          "utilities/check_output.py", READ,
          "Verifies every agent has a continuous trip-stop-trip timeline.",
          "analyse", requires=("output/output_trips_time_queued",)),
-    # Named for the file each one writes, so a row in the task list and the row
-    # it produces on the board read as the same thing.
-    Task("productivity", "agent_time_statistics.csv",
+    # Named for what each one tells you, and given the same name as the row it
+    # produces on the board, so the two read as the same thing. The file name
+    # is still on the board row's tooltip.
+    Task("productivity", "Vehicle activity analysis",
          "utilities/analyse_productivity.py", DERIVE,
          "Per-agent time budget from the tracks. Also draws "
          "agent_time_histograms.png.",
          "analyse", requires=("output/output_trips_time_queued",)),
-    Task("station_visits", "swap_station_activity.xlsx",
+    Task("station_visits", "Station visit times and arrival charge levels",
          "utilities/extract_station_visits.py", DERIVE,
          "Every swap-station visit, extracted from the per-agent tracks.",
          "analyse", requires=("output/output_trips_time_queued",)),
@@ -190,7 +191,7 @@ TASKS = [
     # gated on another analysis. It is also gated on that spreadsheet being at
     # least as new as the run: charging profiles computed from a superseded
     # export are indistinguishable from current ones once they are on disk.
-    Task("charge_profile", "battery_charge_profile.xlsx",
+    Task("charge_profile", "Generate CLOVER inputs",
          "utilities/battery_charge_profile.py", DERIVE,
          "Draws battery_charge_load.png "
          "and battery_charge_states.png, and writes the hourly load as "
@@ -199,7 +200,7 @@ TASKS = [
          "analyse", modes=RUNNABLE_MODES,
          requires=("output/swap_station_activity.xlsx",),
          newer_than=("output/output_trips_time_queued",)),
-    Task("station_utilisation", "swap_station_arrivals.csv",
+    Task("station_utilisation", "Station visits per 15min period",
          "utilities/swap_station_utilisation.py", DERIVE,
          "Arrival profile per station. Also draws "
          "swap_station_arrivals_grid.png.",
@@ -234,7 +235,11 @@ TASKS = [
          "Road extraction/OSM_road_extractor.py", IRREVERSIBLE,
          "Downloads the current OSM network for the scenario's area and "
          "overwrites roads.graphml. No backup is kept.",
-         "inputs", requires=("geojson_files/area.geojson",)),
+         "inputs", requires=("geojson_files/area.geojson",),
+         # The extractor stops to ask when OSM has road types the speed table
+         # does not list. Run from here nobody can answer, so it proceeds and
+         # the log lists what was dropped; the run dialog has already asked.
+         extra_args=["--yes"]),
     # Wraps a polygon around the captured trip endpoints.
     Task("area_from_trips", "Area from captured trips",
          "utilities/generate_area_from_trips.py", CONFIRM,
@@ -417,6 +422,14 @@ TOOLS = [
     Tool("Edit demand frequencies", "utilities/edit_demand_frequencies.html",
          "Hourly and weekly trip frequency profiles.", "edit",
          accepts_scenario=True, modes=(DEMAND_MODEL_MODE,)),
+    # Last of the inputs. Never gated: a scenario always runs with some speed
+    # table -- the shared one if not its own -- so there is always something to
+    # show. Editable once customised, which writes the table into the scenario
+    # file, which is why it sits with the editors rather than the viewers.
+    Tool("Road speeds", "utilities/view_road_speeds.html",
+         "The km/h used for each road type and how much of the network each is. "
+         "Customise to give this scenario speeds of its own.",
+         "edit", accepts_scenario=True),
 ]
 
 # Rendered in this order. Captured vehicle data comes first because it is what
@@ -582,27 +595,30 @@ ARTEFACTS = [
              # spreadsheet tabulates.
              previews=("output/station_queues_analysis.png",)),
 
-    Artefact("productivity", "agent_time_statistics.csv",
+    Artefact("productivity", "Vehicle activity analysis",
              "output/agent_time_statistics.csv", "analyse",
              depends_on=("tracks",), produced_by="productivity",
              previews=("output/agent_time_histograms.png",)),
-    Artefact("activity", "swap_station_activity.xlsx",
+    Artefact("activity", "Station visit times and arrival charge levels",
              "output/swap_station_activity.xlsx", "analyse",
              depends_on=("tracks",), produced_by="station_visits"),
-    Artefact("arrivals", "swap_station_arrivals.csv",
-             "output/swap_station_arrivals.csv", "analyse",
-             depends_on=("tracks",), produced_by="station_utilisation",
-             previews=("output/swap_station_arrivals_grid.png",)),
     # Derived from the activity spreadsheet, not the tracks, so that is what it
     # is dated against -- an export refreshed after a new run carries the run's
-    # own date forward and this goes stale behind it either way.
-    Artefact("charge_profile", "battery_charge_profile.xlsx",
+    # own date forward and this goes stale behind it either way. Listed
+    # straight after it for the same reason: the board reads in this order.
+    # And against the stations: each one's charge_slots is read from
+    # swap_stations.geojson, so changing a station's chargers makes this stale.
+    Artefact("charge_profile", "Generate CLOVER inputs",
              "output/battery_charge_profile.xlsx", "analyse",
-             depends_on=("activity",), produced_by="charge_profile",
+             depends_on=("activity", "swap"), produced_by="charge_profile",
              required_when=RUNNABLE_MODES,
              previews=("output/battery_charge_load.png",
                        "output/battery_charge_states.png"),
              downloads=("output/total_load.csv", "output/total_load.zip")),
+    Artefact("arrivals", "Station visits per 15min period",
+             "output/swap_station_arrivals.csv", "analyse",
+             depends_on=("tracks",), produced_by="station_utilisation",
+             previews=("output/swap_station_arrivals_grid.png",)),
     # Measured from whatever tracks exist, so it belongs to every mode -- in
     # calibration mode the tracks are the captured ones.
     Artefact("deviation_factor", "deviation_factor.csv",

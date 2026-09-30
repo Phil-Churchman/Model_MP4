@@ -1,0 +1,1 @@
+{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[1.2727225376205942,52.62376243811141]},"properties":{"type":"swap","facility_id":1}},{"type":"Feature","geometry":{"type":"Point","coordinates":[1.2721854946395534,52.63716542982496]},"properties":{"type":"swap","facility_id":2}}]}

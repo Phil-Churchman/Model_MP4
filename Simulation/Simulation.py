@@ -9,6 +9,13 @@ import time
 import multiprocessing
 import heapq
 import functools
+
+# The imports below (numpy, matplotlib, osmnx, scipy) take several seconds with
+# nothing printed. Main process only: spawned workers re-run this file as
+# __mp_main__, and each would print it again.
+if __name__ == "__main__":
+    print("Loading libraries ...", flush=True)
+
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
@@ -940,6 +947,11 @@ def main():
     # mix this run's output with an earlier one's. Nothing is kept: the previous
     # run is gone from here on, and what replaces it is whatever this run
     # produces.
+    #
+    # A message before each stage that has no progress bar of its own, so a
+    # long silent step -- loading a large network, writing the spreadsheet --
+    # reads as work under way rather than as a hang.
+    print("Clearing previous results ...")
     OutputCleaner.for_scenario(SCENARIO).clear_output_dir()
 
     # Created up front: plot_station_queues, the Excel export and the demand
@@ -951,24 +963,30 @@ def main():
     # os.makedirs(OUTPUT_PER_AGENT_DIR, exist_ok=True)
     os.makedirs(OUTPUT_PER_AGENT_TIME_DIR, exist_ok=True)
 
+    print(f"Loading road network ({os.path.basename(ROAD_NETWORK_FILE)}) ...")
     G_wgs84 = ox.load_graphml(ROAD_NETWORK_FILE)
-    
+    print(f"  {G_wgs84.number_of_nodes():,} nodes, {G_wgs84.number_of_edges():,} edges")
+
     # Save original lat/long for GeoJSON mapping outputs
     wgs_coords_dict = {n: (float(G_wgs84.nodes[n]['x']), float(G_wgs84.nodes[n]['y'])) for n in G_wgs84.nodes()}
-    
+
     # Project the graph to UTM (Meters)
+    print("Projecting road network to metres ...")
     G = ox.project_graph(G_wgs84)
     print(f"Routing Mode: {'TIME' if SPEED_BASED_ROUTING else 'DISTANCE'} (Weight: {ROUTING_ATTR})")
-    
+
     # Create transformer for GeoJSON inputs (WGS84 -> UTM)
     target_crs = G.graph['crs']
     transformer = Transformer.from_crs("EPSG:4326", target_crs, always_xy=True)
-    
+
+    print(f"Setting travel times from road speeds ({os.path.basename(ROAD_SPEEDS_SOURCE)}) ...")
     edge_lookup = build_edge_lookup(G)
     nodes = list(G.nodes())
+    print("Building routing graph ...")
     route_graph, index_of, reverse_csr = build_routing_structures(edge_lookup, nodes)
 
     # Projected metric coordinates, for passenger-destination sampling
+    print("Indexing road positions for location lookups ...")
     utm_coords_dict = {n: (float(G.nodes[n]['x']), float(G.nodes[n]['y'])) for n in nodes}
     node_tree = KDTree([utm_coords_dict[n] for n in nodes])
 
@@ -987,6 +1005,7 @@ def main():
         print("Generating trip demand using the demand model...")
         trips=[]
         features = generate_trips(SCENARIO)["features"]
+        print(f"Matching {len(features):,} trips to the road network ...")
         idx = 0
         for feat in features:
             src_lon, src_lat = feat["geometry"]["coordinates"][0]
@@ -1009,6 +1028,8 @@ def main():
             idx += 1
         trips.sort(key=lambda x: x["departure_time"])
 
+    print("Placing swap stations" + (" and taxi ranks" if SIM_MODE == HAIL_RANK else "")
+          + " on the road network ...")
     swap_nodes = load_pts(SWAP_STATIONS_FILE)
     # Only hail-rank mode routes to a rank, so the other two neither load the
     # file nor require it to exist.
@@ -1224,6 +1245,7 @@ def main():
                              calculate_next_activity(request_for(agents[i], s, quiet_ahead)))
 
     pool.close(); retired_agents.extend(agents)
+    print(f"Drawing {os.path.basename(HISTOGRAM_PLOT)} ...")
     plot_station_queues(stations, HISTOGRAM_PLOT)
 
     # Per-timestep station detail. Everything below this point -- the demand
@@ -1258,6 +1280,9 @@ def main():
                 ", ".join(map(str, queue_ids))
             ))
 
+        # Can take minutes at hundreds of thousands of rows, with no bar.
+        print(f"Writing {os.path.basename(SWAP_EXCEL_OUTPUT)} "
+              f"({len(formatted_swap_records):,} rows) ...")
         try:
             df_swap = pd.DataFrame(formatted_swap_records, columns=cols)
             df_swap.sort_values(by=["sim_step_sec", "station_id"], inplace=True)
@@ -1273,6 +1298,7 @@ def main():
                   f"If the file is open in Excel, close it and re-run; if it is "
                   f"the size, raise simulation_step_sec.\n")
 
+    print("Writing met_demand.json and unmet_demand.json ...")
     with open(os.path.join(OUTPUT_DIR, "met_demand.json"), "w") as f: json.dump(met_demand, f, default=to_serializable)
 
     unmet_demand = [{"idx": d["id"], "request_time": d["departure_time"], "source_facility": d["source_facility"], "dest_facility": d["dest_facility"], "source_category": d["source_category"], "dest_category": d["dest_category"]} for d in unallocated_demand]
@@ -1282,6 +1308,8 @@ def main():
         time_geojson = insert_idle_points({"type":"FeatureCollection","features":a.time_features})
         # with open(f"{OUTPUT_PER_AGENT_DIR}/agent_{a.id:04d}.geojson","w") as f: json.dump({"type":"FeatureCollection","features":a.agent_features}, f, default=to_serializable)
         with open(f"{OUTPUT_PER_AGENT_TIME_DIR}/agent_{a.id:04d}_time.geojson","w") as f: json.dump(time_geojson, f, default=to_serializable)
+
+    print(f"Done. Results are in {OUTPUT_DIR}")
 
 def plot_station_queues(stations, output_path):
     active_stations = sorted([s for s in stations.values() if s.queue_history], key=lambda x: x.station_id)

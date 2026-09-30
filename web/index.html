@@ -41,6 +41,18 @@
     border-radius: 0;
   }
 
+  /* EV-TRACS beside it, after a hairline. Shorter than the Moving Impact mark,
+     whose 30px includes the wheel and sun above its own wordmark, so the two
+     names read at about the same size. One file per theme: the light
+     wordmark's terracotta and green are too dim on the dark bar. */
+  .ap-nav .navbar-brand { display: flex; align-items: center; gap: .75rem; }
+  .ap-nav .navbar-brand .brand-rule {
+    width: 1px; height: 24px; background: var(--ap-hairline-strong);
+  }
+  .ap-nav .navbar-brand img.evtracs-logo { height: 18px; }
+  [data-bs-theme="dark"] .evtracs-logo.for-light,
+  :root:not([data-bs-theme="dark"]) .evtracs-logo.for-dark { display: none; }
+
   /* Pipeline status dots ------------------------------------------------ */
   .dot {
     display: inline-block; width: .55rem; height: .55rem; border-radius: 50%;
@@ -82,6 +94,83 @@
   #log .done { color: var(--ap-green); }
   #log .fail { color: var(--ap-red); }
 
+  /* Guided workflow ----------------------------------------------------- */
+  #wizardBar {
+    position: sticky; z-index: 1019;   /* just under the navbar */
+    background: var(--ap-surface); border-bottom: 1px solid var(--ap-hairline);
+    box-shadow: var(--ap-shadow-sm);
+  }
+  .wiz-chip {
+    min-width: 2.1rem; padding: .15rem .45rem; border-radius: 999px;
+    font-size: .75rem; font-weight: 600; text-align: center;
+    background: var(--ap-fill); color: var(--ap-ink-3); border: 0;
+  }
+  .wiz-chip.done   { background: var(--ap-blue-soft); color: var(--ap-blue); }
+  .wiz-chip.active { background: var(--ap-blue); color: #fff; }
+  /* Everything the current step does not use: faded, and made inert in JS so
+     it cannot be clicked or tabbed to. */
+  body.wizard-on .wiz-dim { opacity: .28; filter: grayscale(.7); transition: opacity .2s; }
+  body.wizard-on .wiz-target {
+    outline: 2px solid var(--ap-blue); outline-offset: 2px;
+    border-radius: var(--ap-r-sm); background: var(--ap-blue-soft);
+  }
+  /* Consecutive highlighted rows share one box rather than each drawing its
+     own and overlapping the next: sides on every row, the top edge on the
+     first and the bottom edge on the last, drawn inside the rows (inset
+     shadows) so neighbouring rows cannot overlap. */
+  body.wizard-on .row-item.wiz-target {
+    outline: 0; border-radius: 0; padding-inline: .6rem;
+    box-shadow: inset 2px 0 0 var(--ap-blue), inset -2px 0 0 var(--ap-blue);
+  }
+  body.wizard-on .row-item.wiz-target.wiz-first {
+    border-top-left-radius: var(--ap-r-sm); border-top-right-radius: var(--ap-r-sm);
+    box-shadow: inset 2px 0 0 var(--ap-blue), inset -2px 0 0 var(--ap-blue),
+                inset 0 2px 0 var(--ap-blue);
+  }
+  body.wizard-on .row-item.wiz-target.wiz-last {
+    border-bottom-left-radius: var(--ap-r-sm); border-bottom-right-radius: var(--ap-r-sm);
+    box-shadow: inset 2px 0 0 var(--ap-blue), inset -2px 0 0 var(--ap-blue),
+                inset 0 -2px 0 var(--ap-blue);
+  }
+  body.wizard-on .row-item.wiz-target.wiz-first.wiz-last {
+    box-shadow: inset 0 0 0 2px var(--ap-blue);
+  }
+  /* Step 2: the settings run long, so Save stays on screen -- stuck to the
+     bottom of the window -- bigger, and glowing once there is something to
+     save. Outside step 2 it is left exactly as it was. */
+  body[data-wiz-step="2"] #saveBar {
+    position: sticky; bottom: 0; z-index: 5;
+    /* Out to the card's edges, whatever its padding. */
+    margin: 1rem calc(-1 * var(--bs-card-spacer-x)) calc(-1 * var(--bs-card-spacer-y));
+    padding: .75rem var(--bs-card-spacer-x);
+    background: var(--ap-surface); outline: 0;
+    border-top: 2px solid var(--ap-blue);
+    border-radius: 0 0 var(--ap-r-lg) var(--ap-r-lg);
+    box-shadow: 0 -6px 16px rgba(0, 0, 0, .12);
+  }
+  body[data-wiz-step="2"] #saveBtn {
+    font-size: 1rem; padding: .45rem 1.25rem;
+    /* No fade between disabled and enabled: at full strength the moment
+       there is something to save, not easing up from the disabled 36%. */
+    transition: none;
+  }
+  body[data-wiz-step="2"] #saveBtn:not(:disabled) { opacity: 1; }
+  body[data-wiz-step="2"] #revertBtn { font-size: .95rem; padding: .4rem 1rem; }
+  body[data-wiz-step="2"] #saveHint { font-size: .9rem; }
+  body[data-wiz-step="2"] #saveBar.has-changes #saveBtn {
+    box-shadow: 0 0 0 4px var(--ap-blue-soft);
+    animation: save-glow 1.6s ease-in-out infinite;
+  }
+  body[data-wiz-step="2"] #saveBar.has-changes #saveHint {
+    color: var(--ap-orange); font-weight: 600;
+  }
+  @keyframes save-glow {
+    50% { box-shadow: 0 0 0 7px var(--ap-blue-soft); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    body[data-wiz-step="2"] #saveBar.has-changes #saveBtn { animation: none; }
+  }
+
   /* Config editor ------------------------------------------------------- */
   .cfg-input { max-width: 14rem; }
 </style>
@@ -92,13 +181,38 @@
   <div class="container-fluid px-3 px-md-4">
     <a class="navbar-brand" href="/app/">
       <img src="img/moving-impact-logo.png" alt="Moving Impact">
+      <span class="brand-rule" aria-hidden="true"></span>
+      <img src="img/evtracs_logo.svg" class="evtracs-logo for-light" alt="EV-TRACS">
+      <img src="img/evtracs_logo_dark.svg" class="evtracs-logo for-dark" alt="EV-TRACS">
     </a>
     <div class="d-flex align-items-center gap-2 ms-auto">
       <span id="health" class="ap-pill"><span class="mono">connecting…</span></span>
+      <button id="wizardStartBtn" class="btn btn-sm btn-primary" type="button">
+        <i class="bi bi-signpost-split"></i> Guided workflow
+      </button>
       <button id="themeBtn" class="btn btn-sm btn-secondary" type="button"></button>
     </div>
   </div>
 </nav>
+
+<!-- Guided workflow ---------------------------------------------------->
+<div id="wizardBar" class="d-none" role="region" aria-label="Guided workflow">
+  <div class="container-fluid px-3 px-md-4 py-2 d-flex flex-wrap align-items-center gap-3">
+    <div id="wizardSteps" class="d-flex gap-1"></div>
+    <div class="flex-grow-1" style="min-width:16rem">
+      <div><strong id="wizardTitle"></strong>
+        <span id="wizardScenario" class="row-note ms-2"></span></div>
+      <div id="wizardText" class="row-note"></div>
+    </div>
+    <div class="d-flex gap-2">
+      <button id="wizardBack" class="btn btn-sm btn-secondary" type="button">Back</button>
+      <button id="wizardNext" class="btn btn-sm btn-primary" type="button">Next</button>
+      <button id="wizardExit" class="btn btn-sm btn-outline-danger" type="button">
+        <i class="bi bi-x-lg"></i> Exit wizard
+      </button>
+    </div>
+  </div>
+</div>
 
 <div class="ap-shell ap-shell-wide">
 
@@ -121,22 +235,33 @@
         <div class="card-body">
           <div class="input-group mb-3">
             <select id="scenarioSelect" class="form-select"></select>
+            <button class="btn btn-secondary" type="button" id="newBtn"
+                    aria-label="New scenario">
+              <i class="bi bi-plus-lg"></i>
+            </button>
             <button class="btn btn-secondary" type="button" id="copyBtn"
-                    title="Copy this scenario to a new folder and scenario file">
+                    aria-label="Copy scenario">
               <i class="bi bi-copy"></i>
+            </button>
+            <button class="btn btn-secondary" type="button" id="deleteBtn"
+                    aria-label="Delete scenario">
+              <i class="bi bi-trash3 text-danger"></i>
             </button>
           </div>
           <div id="scenarioInfo" class="mb-3"></div>
 
           <div id="editor"></div>
 
-          <div class="d-flex gap-2 mt-3">
+          <div id="saveBar" class="mt-3">
+          <div class="d-flex align-items-center gap-2">
             <button id="saveBtn" class="btn btn-primary btn-sm" disabled>
               <i class="bi bi-check2"></i> Save changes
             </button>
             <button id="revertBtn" class="btn btn-secondary btn-sm" disabled>Revert</button>
+            <span id="saveHint" class="row-note"></span>
           </div>
           <div id="saveMsg" class="mt-2" style="font-size:.85rem"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -223,6 +348,80 @@
     </div>
   </div>
 
+  <!-- New scenario ----------------------------------------------------->
+  <div class="modal fade" id="newModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">New scenario</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <label class="form-label" for="newName">Name</label>
+          <input type="text" class="form-control mb-3" id="newName"
+                 placeholder="e.g. kumasi" autocomplete="off">
+          <div class="mb-3">
+            <div class="form-check form-check-inline">
+              <input class="form-check-input" type="radio" name="newRoot" id="newRootShared"
+                     value="scenarios_shared">
+              <label class="form-check-label" for="newRootShared">Shared</label>
+            </div>
+            <div class="form-check form-check-inline">
+              <input class="form-check-input" type="radio" name="newRoot" id="newRootPrivate"
+                     value="scenarios_private">
+              <label class="form-check-label" for="newRootPrivate">Private</label>
+            </div>
+            <span class="row-note d-block">Shared scenarios go in the repository;
+              private ones stay on this machine.</span>
+          </div>
+          <p class="row-note" id="newTemplate"></p>
+          <div id="newCheck" class="row-note"></div>
+          <div id="newMsg" class="mt-2" style="font-size:.85rem"></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" id="newGo" class="btn btn-primary btn-sm" disabled>
+            Create scenario
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Delete scenario -------------------------------------------------->
+  <div class="modal fade" id="deleteModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title text-danger">
+            <i class="bi bi-exclamation-triangle"></i> Delete scenario
+          </h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="alert alert-danger py-2 mb-3">
+            <strong>This cannot be undone.</strong> The files are deleted outright,
+            not moved to the Recycle Bin.
+          </div>
+          <div id="deleteItems" class="mb-3"></div>
+          <div id="deleteConfirmRow">
+            <label class="form-label" for="deleteName">
+              Type <strong class="mono" id="deleteNameHint"></strong> to confirm
+            </label>
+            <input type="text" class="form-control" id="deleteName" autocomplete="off">
+          </div>
+          <div id="deleteMsg" class="mt-2" style="font-size:.85rem"></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" id="deleteGo" class="btn btn-danger btn-sm" disabled>
+            Delete permanently
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Copy scenario ---------------------------------------------------->
   <div class="modal fade" id="copyModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">
@@ -257,12 +456,6 @@
       </div>
     </div>
   </div>
-
-  <hr class="ap-hairline">
-  <p class="row-note">
-    Same URL space as Live Server, so every tool works under either &mdash;
-    <a href="/api/docs">API docs</a>.
-  </p>
 </div>
 
 <!-- Needed for the folder-picker modal. -->
@@ -276,7 +469,7 @@ function renderThemeBtn() {
   const dark = document.documentElement.getAttribute("data-bs-theme") === "dark";
   const btn = $("#themeBtn");
   btn.innerHTML = `<i class="bi ${dark ? "bi-sun" : "bi-moon"}"></i>`;
-  btn.title = btn.ariaLabel = dark ? "Switch to light mode" : "Switch to dark mode";
+  btn.ariaLabel = dark ? "Switch to light mode" : "Switch to dark mode";
 }
 $("#themeBtn").onclick = () => {
   const next = document.documentElement.getAttribute("data-bs-theme") === "dark"
@@ -362,6 +555,10 @@ let SCENARIO = null, EDITS = {}, currentJob = null, logOffset = 0, poller = null
 //   whenAbsent  show this value when the key is missing from the file, instead
 //               of leaving the row out. Must equal what the model does with the
 //               key absent, or the panel reports settings the run is not using.
+//   showIf      [key, value]: only show the field while that other field holds
+//               that value, counting unsaved edits, so the row appears and
+//               disappears as the other control changes. Hidden, not dropped:
+//               its value stays in the file and is still saved.
 //
 // Calibration is not a fleet run -- Simulation.py refuses it -- so it keeps
 // only the keys the calibration scripts themselves read.
@@ -437,16 +634,17 @@ const FIELDS = [
                                      { modes: RUNNABLE }],
   ["charge_efficiency",    "float",  "Share of metered energy reaching the battery, 0-1",
                                      { modes: RUNNABLE }],
-  ["total_charge_slots",   "int",    "Chargers at each station",
-                                     { modes: RUNNABLE }],
+  // No chargers-per-station row: that is each station's own charge_slots in
+  // swap_stations.geojson now, set in the stations editor.
   ["charge_slot_switch_time", "int", "Changeover before a free slot takes the next battery, seconds",
                                      { modes: RUNNABLE, whenAbsent: 0 }],
   ["charge_strategy",      "strategy", "How the charging queue is served",
                                      { modes: RUNNABLE }],
+  // Read only under the window strategy; immediate charging has no window.
   ["charge_window_start",  "timeofday", "window strategy only: when charging may start",
-                                     { modes: RUNNABLE }],
+                                     { modes: RUNNABLE, showIf: ["charge_strategy", "window"] }],
   ["charge_window_end",    "timeofday", "window strategy only: when all charging stops",
-                                     { modes: RUNNABLE }],
+                                     { modes: RUNNABLE, showIf: ["charge_strategy", "window"] }],
 ];
 
 // Kept in step with SIMULATION_MODES in scenario_config.py.
@@ -511,22 +709,35 @@ async function loadScenarios() {
     const inRoot = scenarios.filter(s => s.file.startsWith(root + "/"));
     if (!inRoot.length) continue;
     const group = document.createElement("optgroup");
-    group.label = root;
+    // Headed as the New dialog names them; the folder name is only a label.
+    group.label = { scenarios_shared: "Shared", scenarios_private: "Private" }[root] || root;
     for (const s of inRoot) {
       const opt = document.createElement("option");
       opt.value = s.file;
+      // Every file is scenario_<name>.json, so only <name> tells them apart.
+      // The value keeps the full id, which is what the API is addressed by.
       opt.textContent = s.file.slice(root.length + 1)
-        + (s.active ? "  (active)" : "") + (s.ok ? "" : "  (unreadable)");
+        .replace(/^scenario_/, "").replace(/\.json$/, "")
+        + (s.ok ? "" : "  (unreadable)");
       if (s.active) opt.selected = true;
       group.appendChild(opt);
     }
     sel.appendChild(group);
   }
+  // The scenario in the address wins over the active one, so a reload comes
+  // back to what was on screen. Ignored if that file has since gone.
+  const inUrl = new URLSearchParams(location.search).get("scenario");
+  if (inUrl && scenarios.some(s => s.file === inUrl)) sel.value = inUrl;
   await showScenario();
 }
 
 async function showScenario() {
   SCENARIO = await api(scenarioUrl($("#scenarioSelect").value));
+  // Kept in the address (replaced, not pushed: Back should leave the panel,
+  // not step through every scenario looked at) so a reload stays here.
+  const url = new URL(location.href);
+  url.searchParams.set("scenario", SCENARIO.file);
+  history.replaceState(null, "", url);
   EDITS = {};
   markClean();
   $("#scenarioInfo").innerHTML = `
@@ -534,9 +745,7 @@ async function showScenario() {
     <span class="ap-pill ${SCENARIO.folder_exists ? "is-live" : "is-error"}">
       ${SCENARIO.folder_exists ? "folder found" : "folder missing"}</span>
     ${SCENARIO.simulation_mode
-      ? `<span class="ap-pill is-info ms-1"
-               title="Only the pipeline, tasks and tools this mode uses are shown"
-         >${SCENARIO.simulation_mode}</span>` : ""}`;
+      ? `<span class="ap-pill is-info ms-1">${SCENARIO.simulation_mode}</span>` : ""}`;
   renderEditor();
   renderBoard();
   // Both lists depend on the mode as well as on the scenario path, so they are
@@ -559,8 +768,11 @@ function renderEditor() {
   // A heading is held back until something under it actually renders, so a
   // group whose every field is hidden by the mode leaves no empty label.
   let heading = null;
+  // The heading each row falls under, kept after the label itself is emitted,
+  // so the guided workflow can pick out "Fleet" and "Battery charging" rows.
+  let group = "";
   for (const entry of FIELDS) {
-    if (!Array.isArray(entry)) { heading = entry; continue; }
+    if (!Array.isArray(entry)) { heading = group = entry; continue; }
     const [key, type, help, opts = {}] = entry;
     // No mode at all is an unmigrated file, not a mode that uses nothing:
     // filtering on it would empty the panel. Same rule as relevant().
@@ -569,7 +781,8 @@ function renderEditor() {
     // Absent keys are not invented, unless the field says what absent means.
     if (absent && opts.whenAbsent === undefined) continue;
     if (heading) { rows.push(`<div class="group-label">${heading}</div>`); heading = null; }
-    rows.push(fieldRow(key, type, absent ? opts.whenAbsent : cfg[key], help, absent));
+    rows.push(fieldRow(key, type, absent ? opts.whenAbsent : cfg[key], help, absent)
+      .replace('<div class="row-item"', `<div class="row-item" data-group="${group}"`));
   }
   $("#editor").innerHTML = rows.join("");
 
@@ -590,8 +803,25 @@ function renderEditor() {
       if (JSON.stringify(value) === JSON.stringify(baseline)) delete EDITS[key];
       else EDITS[key] = value;
       markDirty();
+      applyShowIf();
     };
   });
+  applyShowIf();
+}
+
+// Shows or hides every showIf field against the current value of the field it
+// depends on -- the unsaved edit if there is one, else the file's value.
+function applyShowIf() {
+  for (const [key, opts] of FIELD_OPTS) {
+    if (!opts.showIf) continue;
+    const row = $(`#editor [data-key="${key}"]`)?.closest(".row-item");
+    if (!row) continue;
+    const [other, want] = opts.showIf;
+    const current = other in EDITS ? EDITS[other] : SCENARIO.config[other];
+    // Loose, as battery_charge_profile.py reads it: "Window" counts as window.
+    row.classList.toggle("d-none",
+      String(current ?? "").trim().toLowerCase() !== want);
+  }
 }
 
 function fieldRow(key, type, value, help, absent) {
@@ -624,7 +854,7 @@ function fieldRow(key, type, value, help, absent) {
                  value="${String(value).replace(/"/g, "&quot;")}">`;
   }
   return `<div class="row-item">
-      <span class="mono" title="${help}">${key}${absent
+      <span class="mono">${key}${absent
         ? ` <span class="row-note">not in file &mdash; saved if you change it</span>`
         : ""}</span>
       <span>${control}</span>
@@ -681,6 +911,10 @@ function markDirty() {
   $("#saveBtn").disabled = $("#revertBtn").disabled = n === 0;
   $("#saveState").innerHTML = n
     ? `<span class="ap-pill is-warn">${n} unsaved</span>` : "";
+  // Beside the button itself, so it says why Save is or is not available.
+  $("#saveHint").textContent = n ? `${n} unsaved change${n === 1 ? "" : "s"}`
+                                 : "No changes yet";
+  $("#saveBar").classList.toggle("has-changes", n > 0);
 }
 function markClean() { EDITS = {}; markDirty(); $("#saveMsg").textContent = ""; }
 
@@ -702,6 +936,306 @@ $("#saveBtn").onclick = async () => {
   }
 };
 $("#revertBtn").onclick = () => { renderEditor(); markClean(); };
+
+// ---------- new scenario ----------
+const newModal = new bootstrap.Modal($("#newModal"));
+const newRoot = () => document.querySelector('input[name="newRoot"]:checked').value;
+
+$("#newBtn").onclick = () => {
+  $("#newName").value = "";
+  // Shared or private as the scenario on screen is, which is usually where
+  // the next one belongs too.
+  const here = String(SCENARIO && SCENARIO.file || "").split("/")[0];
+  $(here === "scenarios_private" ? "#newRootPrivate" : "#newRootShared").checked = true;
+  $("#newTemplate").textContent = SCENARIO
+    ? `Settings start as a copy of ${SCENARIO.file}; change them once it is `
+      + `created. Inputs start empty: draw the area, download the roads and `
+      + `place stations with the tools.`
+    : "";
+  $("#newMsg").textContent = "";
+  checkNewName();
+  newModal.show();
+  setTimeout(() => $("#newName").focus(), 200);
+};
+
+// Asks the server, which is the only thing that can see the folders, whether
+// the name is free -- as you type, so Create is never offered for a name that
+// will be refused. Each answer is dropped if a newer question has been asked,
+// so fast typing cannot leave an old verdict on screen.
+let newCheckSeq = 0, newCheckTimer = null;
+function checkNewName() {
+  $("#newGo").disabled = true;
+  clearTimeout(newCheckTimer);
+  const name = $("#newName").value.trim();
+  if (!name) { $("#newCheck").textContent = ""; return; }
+  const seq = ++newCheckSeq;
+  newCheckTimer = setTimeout(async () => {
+    try {
+      const r = await api(`/api/new-scenario/check?name=${encodeURIComponent(name)}`
+                          + `&root=${encodeURIComponent(newRoot())}`);
+      if (seq !== newCheckSeq) return;
+      const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+      $("#newCheck").innerHTML = r.ok
+        ? `<span class="ap-pill is-live">Name is free</span>
+           <div class="mt-2">Will create:</div>
+           <div class="mono mt-1">${esc(r.paths.file)}</div>
+           <div class="mono">${esc(r.paths.folder)}/geojson_files</div>
+           <div class="mono">${esc(r.paths.output)} <span class="row-note">(on first run)</span></div>`
+          + (r.also_in ? `<div class="mt-2">Note: ${esc(r.also_in)} already has a
+             scenario called this. Allowed, as results are kept apart, but easy
+             to mix up.</div>` : "")
+        : r.problems.map(p => `<span class="ap-pill is-error d-inline-block mb-1">${esc(p)}</span>`).join("<br>");
+      $("#newGo").disabled = !r.ok;
+    } catch (e) {
+      if (seq === newCheckSeq) $("#newCheck").innerHTML =
+        `<span class="ap-pill is-error">${e.message}</span>`;
+    }
+  }, 250);
+}
+$("#newName").oninput = checkNewName;
+document.querySelectorAll('input[name="newRoot"]').forEach(r => r.onchange = checkNewName);
+$("#newName").onkeydown = e => { if (e.key === "Enter" && !$("#newGo").disabled) $("#newGo").click(); };
+
+$("#newGo").onclick = async () => {
+  $("#newGo").disabled = true;
+  $("#newMsg").innerHTML = '<span class="ap-pill">creating…</span>';
+  try {
+    const r = await api("/api/new-scenario", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: $("#newName").value.trim(), root: newRoot(),
+                             template: SCENARIO && SCENARIO.file })
+    });
+    newModal.hide();
+    await loadScenarios();
+    $("#scenarioSelect").value = r.scenario_file;
+    await showScenario();
+  } catch (e) {
+    // Most likely the name was taken between the check and the click.
+    $("#newMsg").innerHTML = `<span class="ap-pill is-error">${e.message}</span>`;
+    checkNewName();
+  }
+};
+
+// ---------- guided workflow ----------
+// Steps through the usual order of work on one scenario. Each step names the
+// rows it uses; those are highlighted and everything else in the four working
+// panes is faded and made inert. The task output log is left alone, so a run
+// can be watched from any step.
+const $$ = s => [...document.querySelectorAll(s)];
+const WIZARD_STEPS = [
+  { id: "1", title: "Edit inputs",
+    text: "Set up this scenario's inputs: draw the area, download the road network, "
+        + "then place swap stations (with their posts and chargers) and demand. Each "
+        + "editor opens in a new tab and has "
+        + "Save to scenario. Road speeds shows the speeds the network uses.",
+    empty: "No input editors are available for this scenario.",
+    targets: () => [...$$('#tools [data-group="edit"]'),
+                    ...$$('#tools [data-tool="utilities/view_road_speeds.html"]'),
+                    ...$$('#tasks [data-stage="inputs"]')] },
+  { id: "2", title: "Set simulation parameters",
+    text: "Set the Fleet and Battery charging parameters, then Save changes. "
+        + "Chargers at each station are set with the stations in step 1.",
+    empty: "This scenario's mode has no fleet or battery settings.",
+    targets: () => [...$$('#editor [data-group="Fleet"], #editor [data-group="Battery charging"]'),
+                    $("#saveBar")] },
+  { id: "3", title: "Run the simulation",
+    text: "Run the simulation and follow it in Python Task Output. Wait for it to "
+        + "finish before going on: the next steps use what it writes.",
+    empty: "The simulation needs a road network and swap stations first (step 1).",
+    targets: () => $$('#tasks [data-task-row="simulate"]') },
+  { id: "4", title: "View animations",
+    text: "Replay the run: the fleet moving on the map, and the queues and swaps at each station.",
+    empty: "The animations appear once the simulation has run (step 3).",
+    targets: () => $$('#tools [data-tool="animation/animation.html"], '
+                      + '#tools [data-tool="animation/station_animation.html"]') },
+  { id: "5A", title: "Analyse swap station activity",
+    text: "Run Station visit times and arrival charge levels: extracts every visit "
+        + "to a swap station, with the battery level on arrival.",
+    empty: "Available once the simulation has run (step 3).",
+    targets: () => $$('#tasks [data-task-row="station_visits"]') },
+  { id: "5B", title: "Generate CLOVER inputs",
+    text: "Run Generate CLOVER inputs: models the charging queue behind the returned "
+        + "batteries and writes the hourly grid load.",
+    empty: "Available once step 5A has run, and only while its output is newer than the simulation.",
+    targets: () => $$('#tasks [data-task-row="charge_profile"]') },
+  { id: "6", title: "View outputs",
+    text: "Open or download the results: the per-timestep station spreadsheet, the "
+        + "station visits, and the CLOVER inputs (figures and hourly load).",
+    empty: "Nothing to view yet: run the earlier steps first.",
+    targets: () => $$('#board [data-art="timesteps"], #board [data-art="activity"], '
+                      + '#board [data-art="charge_profile"]') },
+];
+let WIZARD = null;   // index of the current step, or null when off
+
+// Every row and control in the working panes that a step can enable or lock.
+// The output log card is deliberately not in here.
+const WIZ_UNITS = ["#scenarioSelect", "#newBtn", "#copyBtn", "#deleteBtn", "#scenarioInfo",
+                   "#editor .row-item", "#editor .group-label", "#saveBar",
+                   "#board .row-item", "#board .group-label", "#tasks .row-item",
+                   "#tasks .group-label", "#tools .row-item", "#tools .group-label"].join(", ");
+
+function wizardApply() {
+  const units = $$(WIZ_UNITS);
+  units.forEach(u => {
+    u.classList.remove("wiz-dim", "wiz-target", "wiz-first", "wiz-last");
+    u.inert = false;
+  });
+  if (WIZARD === null) return;
+  const step = WIZARD_STEPS[WIZARD];
+  const targets = step.targets().filter(Boolean);
+  const isTarget = u => targets.includes(u);
+  // A heading stays readable when a row under it is in use, so the rows keep
+  // their context ("Fleet", "analyse", "edit inputs").
+  const headsATarget = label => {
+    for (let n = label.nextElementSibling; n && !n.classList.contains("group-label");
+         n = n.nextElementSibling)
+      if (targets.includes(n)) return true;
+    return false;
+  };
+  for (const u of units) {
+    if (isTarget(u)) u.classList.add("wiz-target");
+    else if (u.classList.contains("group-label") && headsATarget(u)) continue;
+    else { u.classList.add("wiz-dim"); u.inert = true; }
+  }
+  // Where highlighted rows run on from one another, mark the run's first and
+  // last so the CSS draws one box round the lot. Hidden rows (a showIf field
+  // switched off) are stepped over, so they do not split a run in two.
+  const visibleSibling = (el, dir) => {
+    let n = el[dir];
+    while (n && n.classList.contains("d-none")) n = n[dir];
+    return n;
+  };
+  const inRun = n => n && n.classList.contains("row-item") && targets.includes(n);
+  for (const t of targets) {
+    if (!t.classList.contains("row-item")) continue;
+    if (!inRun(visibleSibling(t, "previousElementSibling"))) t.classList.add("wiz-first");
+    if (!inRun(visibleSibling(t, "nextElementSibling"))) t.classList.add("wiz-last");
+  }
+  $("#wizardText").innerHTML = step.text + (targets.length ? ""
+    : `<br><span class="text-warning-emphasis">${step.empty}</span>`);
+}
+
+function wizardRender() {
+  const on = WIZARD !== null;
+  document.body.classList.toggle("wizard-on", on);
+  // Which step, for styles that belong to one step only (step 2's save bar).
+  document.body.dataset.wizStep = on ? WIZARD_STEPS[WIZARD].id : "";
+  $("#wizardBar").classList.toggle("d-none", !on);
+  $("#wizardStartBtn").classList.toggle("d-none", on);
+  try { on ? sessionStorage.setItem("wizardStep", WIZARD)
+           : sessionStorage.removeItem("wizardStep"); } catch {}
+  if (!on) { wizardApply(); return; }
+  $("#wizardBar").style.top = $(".ap-nav").offsetHeight + "px";
+  const step = WIZARD_STEPS[WIZARD];
+  $("#wizardSteps").innerHTML = WIZARD_STEPS.map((s, i) =>
+    `<button type="button" class="wiz-chip ${i === WIZARD ? "active" : i < WIZARD ? "done" : ""}"
+             data-wiz="${i}" aria-label="Step ${s.id}: ${s.title}">${s.id}</button>`).join("");
+  $$("#wizardSteps [data-wiz]").forEach(b => b.onclick = () => wizardGo(+b.dataset.wiz));
+  $("#wizardTitle").textContent = `Step ${step.id} of 6: ${step.title}`;
+  $("#wizardScenario").textContent = SCENARIO
+    ? `· ${$("#scenarioSelect").selectedOptions[0]?.textContent || SCENARIO.file}` : "";
+  $("#wizardBack").disabled = WIZARD === 0;
+  $("#wizardNext").textContent = WIZARD === WIZARD_STEPS.length - 1 ? "Finish" : "Next";
+  wizardApply();
+  // Bring the first thing to use into view.
+  const first = WIZARD_STEPS[WIZARD].targets().filter(Boolean)[0];
+  if (first) first.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function wizardGo(i) {
+  // Leaving step 2 with unsaved settings would lose them on the next reload
+  // of the scenario (the simulation also runs on what is saved, not on screen).
+  if (WIZARD_STEPS[WIZARD]?.id === "2" && i !== WIZARD && Object.keys(EDITS).length) {
+    alert("Save or revert your changes to the scenario settings first.");
+    return;
+  }
+  WIZARD = i === null ? null : Math.max(0, Math.min(i, WIZARD_STEPS.length - 1));
+  wizardRender();
+}
+
+$("#wizardStartBtn").onclick = () => wizardGo(0);
+$("#wizardBack").onclick = () => wizardGo(WIZARD - 1);
+$("#wizardNext").onclick = () =>
+  WIZARD === WIZARD_STEPS.length - 1 ? wizardGo(null) : wizardGo(WIZARD + 1);
+$("#wizardExit").onclick = () => wizardGo(null);
+
+// The panes redraw themselves -- a scenario load, a task finishing, a save --
+// so the highlighting is re-applied after any change to their contents. Only
+// childList is watched: wizardApply changes attributes, so it cannot retrigger.
+let wizardQueued = false;
+new MutationObserver(() => {
+  if (WIZARD === null || wizardQueued) return;
+  wizardQueued = true;
+  requestAnimationFrame(() => { wizardQueued = false; wizardApply(); });
+}).observe($(".ap-shell"), { childList: true, subtree: true });
+
+// ---------- delete scenario ----------
+const deleteModal = new bootstrap.Modal($("#deleteModal"));
+let DELETE_PLAN = null;
+
+function fmtSize(bytes) {
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
+  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1e3))} KB`;
+}
+
+// Asks the server what would go, rather than working it out here: only it can
+// see the folders, their sizes, and whether a task is running on them.
+$("#deleteBtn").onclick = async () => {
+  DELETE_PLAN = null;
+  $("#deleteName").value = "";
+  $("#deleteGo").disabled = true;
+  $("#deleteMsg").textContent = "";
+  $("#deleteItems").innerHTML = '<span class="ap-pill">checking…</span>';
+  deleteModal.show();
+  const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  try {
+    const p = await api(`/api/delete-scenario/preview?scenario=${encodeURIComponent(SCENARIO.file)}`);
+    DELETE_PLAN = p;
+    $("#deleteNameHint").textContent = p.name;
+    $("#deleteItems").innerHTML = `<div class="mb-1">Will delete:</div>`
+      + p.items.map(i => `<div class="d-flex justify-content-between gap-2">
+            <span><span class="row-note">${esc(i.what)}</span><br>
+                  <span class="mono">${esc(i.path)}</span></span>
+            <span class="row-note text-nowrap">${fmtSize(i.size)}</span></div>`).join("")
+      + (p.shared ? `<div class="row-note mt-2">This is a shared scenario: if it has
+           been committed, git still holds its scenario file and inputs. Results
+           and anything uncommitted are gone for good.</div>` : "")
+      + p.warnings.map(w => `<div class="row-note mt-2">Note: ${esc(w)}.</div>`).join("")
+      + p.blockers.map(b => `<div class="mt-2"><span class="ap-pill is-error">Cannot
+           delete: ${esc(b)}</span></div>`).join("");
+    $("#deleteConfirmRow").classList.toggle("d-none", p.blockers.length > 0);
+    if (!p.blockers.length) setTimeout(() => $("#deleteName").focus(), 200);
+  } catch (e) {
+    $("#deleteItems").innerHTML = `<span class="ap-pill is-error">${e.message}</span>`;
+  }
+};
+
+$("#deleteName").oninput = () => {
+  $("#deleteGo").disabled = !DELETE_PLAN || DELETE_PLAN.blockers.length > 0
+                            || $("#deleteName").value.trim() !== DELETE_PLAN.name;
+};
+
+$("#deleteGo").onclick = async () => {
+  $("#deleteGo").disabled = true;
+  $("#deleteMsg").innerHTML = '<span class="ap-pill">deleting…</span>';
+  try {
+    await api("/api/delete-scenario", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scenario: DELETE_PLAN.scenario,
+                             confirm: $("#deleteName").value.trim() })
+    });
+    deleteModal.hide();
+    // Out of the address too, or a reload would ask for what no longer exists.
+    const url = new URL(location.href);
+    url.searchParams.delete("scenario");
+    history.replaceState(null, "", url);
+    await loadScenarios();
+  } catch (e) {
+    $("#deleteMsg").innerHTML = `<span class="ap-pill is-error">${e.message}</span>`;
+    $("#deleteName").oninput();
+  }
+};
 
 // ---------- copy scenario ----------
 const copyModal = new bootstrap.Modal($("#copyModal"));
@@ -732,10 +1266,14 @@ function updateCopyPreview() {
   // output folder beside the original's rather than a share of it.
   const root = parentOf(SCENARIO.file);
   const out = SCENARIO.config && SCENARIO.config.output_folder;
+  // Same rule as copy_scenario: results go in scenarios_output/shared or
+  // /private by where the scenario file is, so one name can be used in both.
+  const half = { scenarios_shared: "shared", scenarios_private: "private" }[root];
+  const outParent = half ? `scenarios_output/${half}` : out && parentOf(out);
   $("#copyPreview").innerHTML = `Will create:
     <div class="mono mt-1">${root}/scenario_${slug(name)}.json</div>
     <div class="mono">${parentOf(SCENARIO.folder_name)}/${name}</div>`
-    + (out ? `<div class="mono">${parentOf(out)}/${name}</div>` : "");
+    + (out ? `<div class="mono">${outParent}/${name}</div>` : "");
 }
 $("#copyName").oninput = updateCopyPreview;
 
@@ -753,8 +1291,6 @@ $("#copyGo").onclick = async () => {
     // Switch to the copy: making one and then having to find it is a poor trade.
     $("#scenarioSelect").value = r.scenario_file;
     await showScenario();
-    $("#saveMsg").innerHTML =
-      `<span class="ap-pill is-live">Created ${r.scenario_file} (${r.size_mb} MB)</span>`;
   } catch (e) {
     $("#copyMsg").innerHTML = `<span class="ap-pill is-error">${e.message}</span>`;
     $("#copyGo").disabled = false;
@@ -773,7 +1309,7 @@ function renderBoard() {
     .map(stage => {
     const items = byStage[stage] || [];
     return `<div class="group-label">${stageLabel(stage)}</div>` + items.map(a => `
-      <div class="row-item" title="${a.path}">
+      <div class="row-item" data-art="${a.key}">
         <span class="me-2">
           <span class="d-block"><span class="dot dot-${a.status}"></span>${a.label}</span>
           ${outputLinks(a)}
@@ -835,8 +1371,7 @@ function previewButtons(shots, spacing) {
   const labels = previewLabels(shots);
   return shots.map((p, i) =>
     `<a class="btn btn-sm btn-outline-secondary ${spacing} py-0"
-        href="${p.url}" target="_blank" rel="noopener"
-        title="${p.name}">${labels[i]}</a>`).join("");
+        href="${p.url}" target="_blank" rel="noopener">${labels[i]}</a>`).join("");
 }
 
 // Data files meant to leave the model, beside the figures. Labelled with the
@@ -849,8 +1384,7 @@ function downloadButtons(files, spacing) {
   if (!files || !files.length) return "";
   return files.map(f =>
     `<a class="btn btn-sm btn-outline-primary ${spacing} py-0"
-        href="${f.url}" download="${f.name}"
-        title="Download ${f.name}">&darr; ${f.label || f.name}</a>`).join("");
+        href="${f.url}" download="${f.name}">&darr; ${f.label || f.name}</a>`).join("");
 }
 
 // Split from loadTasks so switching scenario re-filters without re-fetching.
@@ -873,7 +1407,7 @@ function renderTasks() {
   $("#tasks").innerHTML = stages.map(stage => `
     <div class="group-label">${stageLabel(stage)}</div>
     ${byStage[stage].map(t => `
-      <div class="row-item">
+      <div class="row-item" data-task-row="${t.id}" data-stage="${t.stage}">
         <span class="me-2">
           <span class="d-block">${t.label}
             ${t.safety === "destructive"
@@ -882,8 +1416,7 @@ function renderTasks() {
           <span class="row-note">${t.description}</span>
         </span>
         <button class="btn btn-sm ${t.runnable ? "btn-primary" : "btn-secondary"}"
-                data-task="${t.id}" ${t.runnable ? "" : "disabled"}
-                title="${t.runnable ? "" : "Blocked: run this from a terminal"}">Run</button>
+                data-task="${t.id}" ${t.runnable ? "" : "disabled"}>Run</button>
       </div>`).join("")}
   `).join("");
 
@@ -931,16 +1464,11 @@ function renderTools() {
       const sep = t.url.includes("?") ? "&" : "?";
       const href = t.accepts_scenario
         ? `${t.url}${sep}scenario=${encodeURIComponent(scenario)}` : t.url;
-      // Which scenario the link carries used to be a pill beside every label,
-      // repeating the picker above once per row. The query string still goes on
-      // the href; the fact that it does, and what happens without it, moves
-      // into the tooltip.
-      const note = t.accepts_scenario
-        ? ` — opens with ${scenario}; opened directly it falls back to scenario.json`
-        : "";
+      // No hover text on dashboard elements: the scenario goes on the href,
+      // and the tool opens on it.
       return `
         <a class="row-item" href="${href}" target="_blank" rel="noopener"
-           title="${t.description}${note}">
+           data-tool="${t.key}" data-group="${g}">
           <span>${t.label}</span>
           <span class="row-note"><i class="bi bi-box-arrow-up-right"></i></span>
         </a>`;
@@ -1025,8 +1553,16 @@ async function runTask(taskId) {
 async function pollLog() {
   if (!currentJob) return;
   const r = await api(`/api/jobs/${currentJob.id}/log?offset=${logOffset}`);
+  // The server resends from one line back (r.start): a progress bar redraws
+  // its line in place, and this is how the page sees the new state. Whatever
+  // is shown from r.start on is replaced with what came back.
+  if (r.start > logOffset) {
+    // The head of a very long log was trimmed past what this page had seen.
+    appendLog([`... ${r.start - logOffset} lines not shown ...`], logOffset);
+    logOffset = r.start;
+  }
+  appendLog(r.lines, r.start);
   logOffset = r.offset;
-  if (r.lines.length) appendLog(r.lines);
   setStatus(r.status, r.duration_s);
   if (r.finished) {
     clearInterval(poller); poller = null;
@@ -1036,17 +1572,27 @@ async function pollLog() {
   }
 }
 
-function appendLog(lines) {
+// Lines are tagged with their index in the job's log, so a resent line --
+// a progress bar's new state -- replaces the one already shown.
+function appendLog(lines, start) {
   const el = $("#log");
-  for (const line of lines) {
+  // Stay pinned to the bottom only if already there, so scrolling back to read
+  // earlier output is not yanked away by every progress update.
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+  if (start !== undefined) {
+    for (const div of [...el.children])
+      if (div.dataset.i !== undefined && +div.dataset.i >= start) div.remove();
+  }
+  lines.forEach((line, k) => {
     const div = document.createElement("div");
     div.className = line.startsWith("$ ") ? "cmd"
                   : /succeeded/.test(line) ? "done"
                   : /failed|cancelled|Traceback|Error/.test(line) ? "fail" : "";
     div.textContent = line;
+    if (start !== undefined) div.dataset.i = start + k;
     el.appendChild(div);
-  }
-  el.scrollTop = el.scrollHeight;
+  });
+  if (atBottom || start === undefined) el.scrollTop = el.scrollHeight;
 }
 function setLog(html) { $("#log").innerHTML = html; }
 
@@ -1071,20 +1617,28 @@ $("#cancelBtn").onclick = async () => {
 };
 $("#scenarioSelect").onchange = () => {
   if (Object.keys(EDITS).length &&
-      !confirm("Discard unsaved changes to this scenario?")) return;
+      !confirm("Discard unsaved changes to this scenario?")) {
+    // The picker has already moved; put it back on the scenario still shown.
+    $("#scenarioSelect").value = SCENARIO.file;
+    return;
+  }
   showScenario();
 };
 
 (async function init() {
   try {
-    const h = await api("/api/health");
-    $("#health").className = "ap-pill is-live";
-    $("#health").innerHTML =
-      `<span class="mono">${h.python.split(/[\\/]/).slice(-3).join("/")}</span>`;
+    await api("/api/health");
+    // Connected: nothing to report, so the pill goes. It stays for "connecting…"
+    // and comes back red below if the server cannot be reached.
+    $("#health").classList.add("d-none");
     await loadScenarios();
     await loadTasks();
     await loadTools();
     await loadJobs();
+    // Back on the step this tab was at before a reload, if the wizard was on.
+    let step = null;
+    try { step = sessionStorage.getItem("wizardStep"); } catch {}
+    if (step !== null && WIZARD_STEPS[+step]) wizardGo(+step);
   } catch (e) {
     $("#health").className = "ap-pill is-error";
     $("#health").textContent = "error: " + e.message;

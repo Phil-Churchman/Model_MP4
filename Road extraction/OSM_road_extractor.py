@@ -12,7 +12,7 @@ import json
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scenario_config import load_scenario, add_scenario_argument
+from scenario_config import load_scenario, add_scenario_argument, load_road_speeds
 
 _parser = argparse.ArgumentParser(
     description="Download the road network for a scenario's area")
@@ -30,7 +30,12 @@ scenario_cfg = SCENARIO.cfg
 FOLDER_NAME = SCENARIO.folder_name
 INPUT_DIR = SCENARIO.input_dir
 
-ROAD_SPEEDS = scenario_cfg["road_speed_km-h"]   # Default speed for roads (in km/h) if not specified in OSM data
+# Which highway types to keep, and their speeds. Read through load_road_speeds,
+# like the simulation, rather than from the scenario file: the table moved to
+# Simulation/road_speeds.json, and no scenario file carries the old
+# "road_speed_km-h" key any more, so reading it directly failed on every one.
+ROAD_SPEEDS, ROAD_SPEEDS_SOURCE = load_road_speeds(SCENARIO)
+print(f"Road speeds from {ROAD_SPEEDS_SOURCE}")
 
 def is_allowed_highway(highway, road_speeds):
     if isinstance(highway, list):
@@ -71,7 +76,7 @@ def review_highway_types(G, road_speeds, assume_yes):
     print(f"\nOSM data contains {len(counts)} highway types across {total:,} edges.")
 
     if zero:
-        print(f"\n  Set to 0 km/h in {os.path.basename(SCENARIO.path)} "
+        print(f"\n  Set to 0 km/h in {os.path.basename(ROAD_SPEEDS_SOURCE)} "
               f"-- will be removed:")
         for h, n in sorted(zero.items(), key=lambda x: -x[1]):
             print(f"    {h:22s} {n:>9,} edges")
@@ -81,11 +86,11 @@ def review_highway_types(G, road_speeds, assume_yes):
         return True
 
     unknown_edges = sum(unknown.values())
-    print(f"\n  NOT LISTED in road_speed_km-h -- will also be removed "
+    print(f"\n  NOT LISTED in {os.path.basename(ROAD_SPEEDS_SOURCE)} -- will also be removed "
           f"({unknown_edges:,} edges, {100 * unknown_edges / total:.1f}%):")
     for h, n in sorted(unknown.items(), key=lambda x: -x[1]):
         print(f"    {h:22s} {n:>9,} edges")
-    print("\n  Add these to road_speed_km-h with a speed to keep them.")
+    print(f"\n  Add these to {ROAD_SPEEDS_SOURCE} with a speed to keep them.")
 
     if assume_yes:
         print("  Proceeding anyway (--yes).")

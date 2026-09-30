@@ -1,6 +1,6 @@
 {
   "folder_name": "scenarios_shared/accra",
-  "output_folder": "scenarios_output/accra",
+  "output_folder": "scenarios_output/shared/accra",
   "sync_evtracs": true,
   "simulation_mode": "hail_rank",
   "speed_based_routing": true,
@@ -48,6 +48,5 @@
   "charge_strategy": "immediate",
   "charge_window_start": [8,0],
   "charge_window_end": [16,0],
-  "total_charge_slots": 8,
   "charge_slot_switch_time": 600
 }

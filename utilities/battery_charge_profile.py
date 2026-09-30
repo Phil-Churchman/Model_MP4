@@ -30,11 +30,13 @@ and the grid draw while n batteries are on charge is
 not the battery, so efficiency divides rather than multiplies.
 
 Each station is modelled on its own: a battery handed in at one station charges
-there and is issued there, because it cannot do anything else. ``charge_slots``
-is read as the count at EVERY station rather than a fleet-wide total, so a
-four-station scenario has four times that many chargers in play. When there is
-more than one station the charts and the workbook carry an "All stations" row
-as well, which is the sum of the individual ones.
+there and is issued there, because it cannot do anything else. How many chargers
+each station has is that station's own ``charge_slots`` in swap_stations.geojson,
+so stations can differ. A scenario file's old ``total_charge_slots`` -- one
+number applied to every station -- is still read for any station that has no
+``charge_slots`` of its own, and the run says which. When there is more than one
+station the charts and the workbook carry an "All stations" row as well, which
+is the sum of the individual ones.
 
 Four outputs, all into the scenario's output folder:
 
@@ -60,6 +62,7 @@ Usage:
     python utilities/battery_charge_profile.py [--scenario FILE]
 """
 
+import json
 import os
 import sys
 import zipfile
@@ -142,7 +145,9 @@ def charge_params(scenario):
         "kwh_per_km": positive("kwh_per_km"),
         "charge_rate": positive("charge_rate"),
         "charge_efficiency": positive("charge_efficiency"),
-        "slots": int(positive("total_charge_slots")),
+        # Chargers are per station now, from swap_stations.geojson; see
+        # station_slots. This is only the fallback for stations without one.
+        "slots_default": _legacy_slots(scenario),
         "switch_s": float(scenario.get("charge_slot_switch_time", 0) or 0),
         # Only read in window mode. An immediate-strategy scenario has no reason
         # to carry a window, and demanding one would refuse a valid file.
@@ -157,6 +162,80 @@ def charge_params(scenario):
         raise SystemExit(f"{scenario.path}: charge_slot_switch_time cannot be "
                          f"negative.")
     return params
+
+
+def _legacy_slots(scenario):
+    """The scenario-wide total_charge_slots, if an older file still has one."""
+    value = scenario.get("total_charge_slots")
+    if value is None:
+        return None
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        raise SystemExit(f"{scenario.path}: 'total_charge_slots' must be a whole "
+                         f"number, got {value!r}.")
+    if value <= 0:
+        raise SystemExit(f"{scenario.path}: 'total_charge_slots' must be greater "
+                         f"than zero, got {value}.")
+    return value
+
+
+def station_slots(scenario, default):
+    """
+    Chargers at each station, keyed as the activity spreadsheet names stations.
+
+    Read from each station's ``charge_slots`` in swap_stations.geojson, keyed by
+    its facility_id -- the id extract_station_visits.py writes into every row
+    -- or by its position when it has none, as Simulation.py numbers them.
+    A station without charge_slots takes `default` (the scenario's old
+    total_charge_slots) and is reported; with no default either, the run stops
+    and names the stations, because a guessed charger count is a guessed load.
+    """
+    path = os.path.join(scenario.input_dir, "swap_stations.geojson")
+    try:
+        with open(path, encoding="utf-8") as f:
+            features = json.load(f).get("features", [])
+    except FileNotFoundError:
+        raise SystemExit(f"No swap_stations.geojson at {path}: the charger count "
+                         f"at each station is read from it.")
+    slots, defaulted, missing = {}, [], []
+    for i, feature in enumerate(features):
+        props = feature.get("properties") or {}
+        name = station_key(props.get("facility_id", i))
+        value = props.get("charge_slots")
+        if value in (None, ""):
+            if default is None:
+                missing.append(name)
+                continue
+            value = default
+            defaulted.append(name)
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            raise SystemExit(f"{path}: station {name} has charge_slots {value!r}; "
+                             f"it must be a whole number.")
+        if value <= 0:
+            raise SystemExit(f"{path}: station {name} has charge_slots {value}; "
+                             f"it must be at least 1.")
+        slots[name] = value
+    if missing:
+        raise SystemExit(
+            f"{path}: station(s) {', '.join(missing)} have no charge_slots, and "
+            f"{os.path.basename(scenario.path)} has no total_charge_slots to fall "
+            f"back on. Set chargers per station in the stations editor.")
+    return slots, defaulted
+
+
+def describe_slots(slots):
+    """'8 charge slots at each station', or each station's count when they differ."""
+    counts = set(slots.values())
+    if len(counts) == 1:
+        n = counts.pop()
+        return f"{n} charge slot{'s' if n != 1 else ''}" + (
+            " at each station" if len(slots) > 1 else "")
+    return "charge slots " + ", ".join(
+        f"station {k}: {v}" for k, v in sorted(slots.items(),
+                                               key=lambda kv: _station_order(kv[0])))
 
 
 def _time_of_day(scenario, key):
@@ -177,16 +256,15 @@ def _time_of_day(scenario, key):
     return hour * 3600 + minute * 60
 
 
-def strategy_line(params, stations):
+def strategy_line(params, slots):
     """One sentence saying how the queue was served, for the chart headers."""
-    each = " at each station" if stations > 1 else ""
     if params["strategy"] == WINDOW:
         opens, closes = params["window"]
         how = (f"charging only between {_hhmm(opens)} and {_hhmm(closes)}")
     else:
         how = "a battery goes on charge as soon as a slot is free"
     return (f"charge_strategy: {params['strategy']} — {how}, "
-            f"{params['slots']} charge slots{each}")
+            f"{describe_slots(slots)}")
 
 
 # ============================================================
@@ -649,7 +727,7 @@ def plot_states(panels, bins, params, out_path, lines, title):
 # MAIN
 # ============================================================
 
-def build_panels(batteries, params, bins, horizon_start, horizon_end,
+def build_panels(batteries, params, slots, bins, horizon_start, horizon_end,
                  modelling_end):
     """
     One panel per station, plus a summed one when there is more than one.
@@ -662,14 +740,14 @@ def build_panels(batteries, params, bins, horizon_start, horizon_end,
     """
     windows = charge_windows(params["strategy"], horizon_start, modelling_end,
                              params["window"])
-    ceiling = params["slots"] * params["charge_rate"] / params["charge_efficiency"]
+    per_charger_kw = params["charge_rate"] / params["charge_efficiency"]
 
     names = sorted(batteries["station"].unique(), key=_station_order)
     panels, all_records = [], []
     for name in names:
         subset = batteries[batteries["station"] == name]
-        records, unfinished = run_charging(subset, params["slots"],
-                                           params["switch_s"], windows)
+        n = slots[name]                       # this station's own chargers
+        records, unfinished = run_charging(subset, n, params["switch_s"], windows)
         all_records.extend(records)
         panels.append({
             "key": f"station_{name}",
@@ -679,8 +757,8 @@ def build_panels(batteries, params, bins, horizon_start, horizon_end,
             # would be reconstructing something already known here.
             "station": name,
             "is_total": False,
-            "slots": params["slots"],
-            "ceiling": ceiling,
+            "slots": n,
+            "ceiling": n * per_charger_kw,
             "records": records,
             "unfinished": unfinished,
             "series": hourly_series(records, list(subset["arrival_at"]), bins,
@@ -694,8 +772,8 @@ def build_panels(batteries, params, bins, horizon_start, horizon_end,
             "title": f"All stations ({len(names)})",
             "station": None,
             "is_total": True,
-            "slots": params["slots"] * len(names),
-            "ceiling": ceiling * len(names),
+            "slots": sum(p["slots"] for p in panels),
+            "ceiling": sum(p["ceiling"] for p in panels),
             "records": all_records,
             "unfinished": sum(p["unfinished"] for p in panels),
             "series": hourly_series(all_records, list(batteries["arrival_at"]),
@@ -836,12 +914,28 @@ def main():
         raise SystemExit(f"{activity} holds no usable swap records.")
 
     stations = sorted(batteries["station"].unique(), key=_station_order)
+    all_slots, defaulted = station_slots(scenario, params["slots_default"])
+    # Only the stations the run actually visited; a visited station the file no
+    # longer lists (deleted after the run) is refused rather than guessed at.
+    unlisted = [s for s in stations if s not in all_slots]
+    if unlisted and params["slots_default"] is None:
+        raise SystemExit(
+            f"Station(s) {', '.join(unlisted)} have swaps in "
+            f"{os.path.basename(activity)} but are not in swap_stations.geojson, "
+            f"so their chargers are unknown. Re-run the simulation and station "
+            f"visits against the current stations.")
+    slots = {s: all_slots.get(s, params["slots_default"]) for s in stations}
+    defaulted = sorted(set(defaulted) & set(stations) | set(unlisted), key=_station_order)
+
     print(f"\n  {len(batteries)} batteries returned at {len(stations)} station(s)"
           + (f" ({fragments} midnight-split fragment(s) merged)" if fragments else ""))
-    print(f"  strategy: {params['strategy']}, "
-          f"{params['slots']} charge slots per station"
-          + (f" ({len(stations)} stations, so "
-             f"{params['slots'] * len(stations)} in total)" if len(stations) > 1 else ""))
+    print(f"  strategy: {params['strategy']}, {describe_slots(slots)}"
+          + (f" ({sum(slots.values())} in total)" if len(stations) > 1 else ""))
+    if defaulted:
+        print(f"  NOTE: station(s) {', '.join(defaulted)} have no charge_slots in "
+              f"swap_stations.geojson, so they use the scenario's "
+              f"total_charge_slots ({params['slots_default']}). Set chargers per "
+              f"station in the stations editor to stop relying on it.")
     print(f"  charge time: {batteries['charge_s'].mean() / 3600:.2f} h mean, "
           f"{batteries['charge_s'].max() / 3600:.2f} h longest "
           f"({batteries['energy_kwh'].mean():.2f} kWh mean into the battery)")
@@ -860,8 +954,8 @@ def main():
     # reported as unfinished because the calendar ran out.
     modelling_end = horizon_end + timedelta(days=365)
 
-    panels = build_panels(batteries, params, bins, horizon_start, horizon_end,
-                          modelling_end)
+    panels = build_panels(batteries, params, slots, bins, horizon_start,
+                          horizon_end, modelling_end)
     summary = [summarise(p, params["charge_efficiency"]) for p in panels]
 
     for panel, row in zip(panels, summary):
@@ -883,7 +977,7 @@ def main():
             print(f"    WARNING: {panel['unfinished']} batteries never reached "
                   f"a charger.")
 
-    lines = [strategy_line(params, len(stations)),
+    lines = [strategy_line(params, slots),
              f"Grid draw is batteries on charge × charge_rate "
              f"({params['charge_rate']:g} kW) ÷ charge_efficiency "
              f"({params['charge_efficiency']:g})."]
@@ -932,9 +1026,10 @@ def main():
          {"parameter": "kwh_per_km", "value": params["kwh_per_km"]},
          {"parameter": "charge_rate (kW)", "value": params["charge_rate"]},
          {"parameter": "charge_efficiency", "value": params["charge_efficiency"]},
-         {"parameter": "total_charge_slots (applied per station)", "value": params["slots"]},
          {"parameter": "stations", "value": ", ".join(stations)},
-         {"parameter": "charge slots in total", "value": params["slots"] * len(stations)},
+         {"parameter": "charge slots per station (swap_stations.geojson)",
+          "value": ", ".join(f"{s}: {slots[s]}" for s in stations)},
+         {"parameter": "charge slots in total", "value": sum(slots.values())},
          {"parameter": "charge_slot_switch_time (s)", "value": params["switch_s"]},
          {"parameter": "charge window", "value": window_text},
          {"parameter": "simulation period", "value": f"{sim_start:%Y-%m-%d %H:%M} to {sim_end:%Y-%m-%d %H:%M}"},

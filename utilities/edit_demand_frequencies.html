@@ -10,6 +10,7 @@
          under both the model server and Live Server. -->
     <link href="../web/css/apple.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="scenario_save.js"></script>
     <style>
         body { background-color: var(--ap-bg); padding-top: 2rem; padding-bottom: 5rem; }
         .card { box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075); margin-bottom: 1.5rem; }
@@ -126,7 +127,7 @@
     document.addEventListener('DOMContentLoaded', () => {
         comboModal = new bootstrap.Modal(document.getElementById('comboModal'));
         initInputs();
-        loadFromScenario();
+        loadFromScenario().then(saver.loaded);
     });
 
     function initInputs() {
@@ -171,6 +172,16 @@
     // Model folder -- resolves against one level up, not against here.
     const MODEL_ROOT = new URL("../", location.href);
     const SCENARIO_URL = new URL(SCENARIO_FILE, MODEL_ROOT).href;
+
+    // Save to scenario: writes demand_frequencies.json straight back into the
+    // scenario's input folder -- no file picker, unlike Save Config, which can
+    // only write to a file the browser was given a handle to. Same text too.
+    const saver = ScenarioSave.attach({
+        scenario: SCENARIO_FILE, file: DEFAULT_FILENAME,
+        serialize: () => JSON.stringify(combinations, null, 2),
+        container: document.getElementById('addComboBtn').parentElement,
+        before: document.getElementById('addComboBtn'),
+    });
 
     async function fetchJSON(url) {
         const res = await fetch(url);
@@ -225,7 +236,7 @@
             // File System Access API cannot write back to it. Saving will ask
             // where to put the file, so the status says where it came from.
             document.getElementById('fileStatus').textContent =
-                "Loaded from scenario -- Save will ask for a location";
+                "Loaded from scenario -- Save to scenario writes it back";
         } catch (err) { console.warn("No demand_frequencies.json:", err); }
 
         setScenarioStatus(

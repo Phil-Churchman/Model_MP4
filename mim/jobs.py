@@ -7,6 +7,7 @@ per job is both simpler and more robust. The API polls by line index, so a
 client that reconnects picks up exactly where it left off.
 """
 
+import codecs
 import itertools
 import os
 import subprocess
@@ -32,6 +33,10 @@ class Job:
         self.started_at = None
         self.finished_at = None
         self.lines = []
+        # Absolute index of lines[0]. Lines are numbered from the start of the
+        # job and never renumbered, so trimming the head of a long log cannot
+        # shift the cursor a client polls with.
+        self.base = 0
         self.error = None
         self._process = None
         self._lock = threading.Lock()
@@ -41,16 +46,35 @@ class Job:
         with self._lock:
             self.lines.append(text)
             if len(self.lines) > MAX_LOG_LINES:
-                # Keep the tail; a truncation marker keeps the log honest about
-                # what it dropped rather than silently losing the start.
+                # Keep the tail. The page sees base move past its cursor and
+                # says what was dropped. (This used to insert a marker line,
+                # which kept the length pinned at the cap -- so a client's
+                # offset never moved again and the log froze.)
                 dropped = len(self.lines) - MAX_LOG_LINES
-                self.lines = ([f"... {dropped} earlier lines truncated ..."]
-                              + self.lines[-MAX_LOG_LINES:])
+                self.lines = self.lines[dropped:]
+                self.base += dropped
+
+    def replace_last(self, text):
+        """Overwrite the newest line -- a progress bar redrawing itself."""
+        with self._lock:
+            if self.lines:
+                self.lines[-1] = text
+            else:
+                self.lines.append(text)
 
     def log_from(self, index):
+        """
+        Lines from absolute index `index - 1` on, where they start, and the end.
+
+        One line back rather than from `index`: the newest line may have been
+        overwritten since the client read it (a progress bar), and resending it
+        is how the client learns its new value. The client replaces whatever
+        it holds from `start` on with what comes back.
+        """
         with self._lock:
-            index = max(0, min(index, len(self.lines)))
-            return self.lines[index:], len(self.lines)
+            end = self.base + len(self.lines)
+            start = max(self.base, min(index - 1, end))
+            return self.lines[start - self.base:], start, end
 
     # -- state -----------------------------------------------------------
     @property
@@ -80,7 +104,7 @@ class Job:
         }
         if include_log_length:
             with self._lock:
-                d["log_length"] = len(self.lines)
+                d["log_length"] = self.base + len(self.lines)
         return d
 
     def cancel(self):
@@ -93,27 +117,69 @@ class Job:
         return False
 
 
-def _stream_output(process, job):
+def _stream_output(stream, job):
     """
-    Forward the child's output line by line.
+    Forward the child's output line by line, keeping progress bars in place.
 
-    Split on \\r as well as \\n: tqdm redraws a progress bar by returning to the
-    start of the line, so reading only on \\n would buffer an entire progress bar
-    into one enormous line and show nothing until the job ended.
+    tqdm redraws a bar by writing \\r -- back to the start of the line -- and the
+    new state, with no newline until it finishes. So a line ended by a lone \\r
+    is a bar's current state and the next line replaces it; a line ended by \\n
+    (or \\r\\n, from a Windows child) is finished and the next one is new.
+
+    That needs the raw characters. The pipe used to be read in universal-newline
+    mode, which turns every \\r into \\n, so each redraw arrived as a new line
+    and one progress bar filled the log with a row per update.
+
+    Read in chunks, not a character at a time, so a bar's state is shown as
+    soon as it arrives: tqdm writes each redraw in one go, and waiting for the
+    next \\r to finish it would leave the page one update behind -- a long way
+    behind, on a slow stage.
     """
+    decode = codecs.getincrementaldecoder("utf-8")("replace").decode
     buffer = ""
-    while True:
-        chunk = process.stdout.read(1)
-        if not chunk:
-            break
-        if chunk in ("\r", "\n"):
-            if buffer.strip():
-                job.append(buffer.rstrip())
-            buffer = ""
+    overwrite = False     # the next line written replaces the newest log line
+    in_bar = False        # the line being read started after a lone \r
+    pending_cr = False    # saw \r; the next character says what it meant
+
+    def put(text):
+        nonlocal overwrite
+        (job.replace_last if overwrite else job.append)(text)
+        overwrite = True
+
+    def end_line(finished):
+        """The line in `buffer` is complete (\\n) or about to be redrawn (\\r)."""
+        nonlocal buffer, overwrite, in_bar
+        text = buffer.rstrip()
+        buffer = ""
+        if text.strip():
+            put(text)
+        if finished:
+            overwrite = in_bar = False
         else:
-            buffer += chunk
-    if buffer.strip():
-        job.append(buffer.rstrip())
+            in_bar = True
+
+    while True:
+        data = stream.read(4096)
+        if not data:
+            break
+        for ch in decode(data):
+            if pending_cr:
+                pending_cr = False
+                if ch == "\n":       # \r\n: an ordinary line ending
+                    end_line(True)
+                    continue
+                end_line(False)      # lone \r: what follows redraws this line
+            if ch == "\r":
+                pending_cr = True
+            elif ch == "\n":
+                end_line(True)
+            else:
+                buffer += ch
+        # A bar's new state, shown now rather than when it is next redrawn.
+        if in_bar and buffer.strip():
+            put(buffer.rstrip())
+    buffer += decode(b"", final=True)
+    end_line(True)
 
 
 class JobManager:
@@ -147,10 +213,17 @@ class JobManager:
         env["PYTHONIOENCODING"] = "utf-8"
 
         try:
+            # stdin closed, not inherited. Inherited, a job shared the server's
+            # own terminal, so a script that asks before doing something -- the
+            # road extractor's y/N -- saw a tty, asked in the server window
+            # where nobody was looking, and the job sat "running" forever.
+            # With stdin on the null device input() gets EOF at once, so a
+            # prompt ends instead of hanging. (isatty() can still say True on
+            # Windows, where NUL is a character device -- do not rely on it.)
             job._process = subprocess.Popen(
                 job.command, cwd=self.cwd, env=env,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="replace", bufsize=0)
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
         except OSError as e:
             job.status = FAILED
             job.error = str(e)
@@ -158,7 +231,10 @@ class JobManager:
             job.finished_at = time.time()
             return
 
-        _stream_output(job._process, job)
+        # Raw bytes, decoded in _stream_output, so a \r survives to tell a
+        # progress bar's redraw from a new line. Popen's own text mode cannot
+        # do that: it always translates newlines.
+        _stream_output(job._process.stdout, job)
         job._process.wait()
         job.returncode = job._process.returncode
         job.finished_at = time.time()

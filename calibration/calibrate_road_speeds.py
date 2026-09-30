@@ -133,7 +133,8 @@ import pandas as pd
 from scipy.optimize import lsq_linear
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scenario_config import load_scenario, add_scenario_argument, writable_path
+from scenario_config import (load_scenario, add_scenario_argument, writable_path,
+                             load_road_speeds)
 
 DEFAULT_MIN_SPEED_KMH = 3.0     # slower than walking is not a road
 DEFAULT_MAX_SPEED_KMH = 120.0
@@ -343,7 +344,9 @@ def main():
     args = parse_args()
     objective = resolve_objective(args)
     scenario = load_scenario(args.scenario)
-    current = scenario["road_speed_km-h"]
+    # The speeds in force, from wherever the simulation reads them -- normally
+    # Simulation/road_speeds.json. Scenario files no longer carry the table.
+    current, current_source = load_road_speeds(scenario)
 
     src = args.input or os.path.join(scenario.trips_time_dir,
                                      "trip_routing_analysis.csv")
@@ -502,8 +505,8 @@ def main():
     print("  (bias > 0 means the routing is slower than what was recorded)")
 
     print(f"\nWrote {out}")
-    print("Nothing has been changed in the scenario -- copy the fitted column "
-          "into road_speed_km-h if you want to adopt it.")
+    print("Nothing has been changed -- copy the fitted column into "
+          f"{current_source} if you want to adopt it.")
 
 
 if __name__ == "__main__":

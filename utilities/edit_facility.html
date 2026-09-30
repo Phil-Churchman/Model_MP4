@@ -22,7 +22,11 @@ html, body {
 #map {   flex: 1; width: 100%; }
 #instructions { font-size:12px; color:#555; margin-left:10px; }
 #progress { font-size:12px; color:green; margin-left:10px; }
-.overlay-container { background:white; padding:5px; border:1px solid gray; max-width:280px; z-index:1000; }
+.overlay-container { background:var(--ap-surface-raised); color:var(--ap-ink); border:1px solid var(--ap-hairline-strong); padding:5px; border-radius:6px; max-width:280px; z-index:1000; }
+/* Read-only fields (the id) in theme colours. They were painted #eee inline,
+   which in dark mode put light text on light grey. */
+.overlay-container input[readonly] { background:var(--ap-fill); color:var(--ap-ink); }
+
 .overlay-container input { margin-bottom:5px; }
 </style>
 </head>
@@ -55,6 +59,7 @@ html, body {
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/ol@7.5.2/dist/ol.js"></script>
+<script src="scenario_save.js"></script>
 <script>
 // ---------- Map & Layers ----------
 const rasterLayer = new ol.layer.Tile({ source: new ol.source.OSM() });
@@ -148,6 +153,11 @@ map.on('singleclick', e=>{
 
   const feature = new ol.Feature(new ol.geom.Point(e.coordinate));
 
+  if(!facilityIdField && FACILITY_SCHEMA){
+    // A file the model reads: its fields are known, so nothing to ask.
+    facilityIdField = FACILITY_SCHEMA.idField;
+    facilityOriginalFields = [...FACILITY_SCHEMA.fields];
+  }
   if(!facilityIdField){
     const idPrompt = prompt("Enter ID field name:", "facility_id");
     if(!idPrompt){ drawMode=false; addBtn.classList.remove('active'); return; }
@@ -160,7 +170,8 @@ map.on('singleclick', e=>{
   }
 
   const allFields = [...facilityOriginalFields];
-  if(!allFields.includes(facilityIdField)) allFields.push(facilityIdField);
+  // Id first, as in the files the model writes and the popup of a loaded one.
+  if(!allFields.includes(facilityIdField)) allFields.unshift(facilityIdField);
 
   allFields.forEach(k=>{
     if(k===facilityIdField){
@@ -168,7 +179,7 @@ map.on('singleclick', e=>{
       feature.set(k, parseInt(newId,10));
       feature.setId(parseInt(newId,10));
     } else {
-      feature.set(k,'');
+      feature.set(k, fieldDefault(k));
     }
   });
 
@@ -200,6 +211,8 @@ function showPopup(feature){
   const idField = feature.get('___idField');
 
   originalFields.forEach(k=>{
+    // Written to the file but not edited here (see FACILITY_SCHEMAS).
+    if(FACILITY_SCHEMA && FACILITY_SCHEMA.hidden.includes(k)) return;
     const div = document.createElement('div');
     div.className='mb-1';
 
@@ -214,7 +227,6 @@ function showPopup(feature){
 
     if(k===idField){
       input.readOnly = true;
-      input.style.backgroundColor='#eee';
     }
 
     div.appendChild(label);
@@ -245,6 +257,12 @@ document.getElementById('saveFacilityBtn').addEventListener('click', ()=>{
   popupFields.querySelectorAll('input').forEach(inp=>{
     let val = inp.value;
     if(inp.dataset.prop===idField) val = parseInt(val,10);
+    else if(FACILITY_SCHEMA && FACILITY_SCHEMA.numeric.includes(inp.dataset.prop)){
+      // Written as a number, as the model's own files have it. Anything that
+      // is not one falls back to the default rather than saving "abc" posts.
+      const n = parseInt(val,10);
+      val = Number.isNaN(n) ? fieldDefault(inp.dataset.prop) : n;
+    }
     currentFeature.set(inp.dataset.prop, val);
   });
 
@@ -333,6 +351,15 @@ function loadFacilitiesGeoJSON(geojson, { confirmReplace = true, fit = true } = 
 
   const originalFields =
     Object.keys(features[0].getProperties()).filter(k=>k!=='geometry');
+  // A file the model reads gets any of its known fields the file lacks -- a
+  // stations file without posts is read as 2 posts each, so it is shown as 2
+  // and can be changed, rather than being a setting nobody can see.
+  if(FACILITY_SCHEMA){
+    FACILITY_SCHEMA.fields.forEach(k=>{
+      if(!originalFields.includes(k)) originalFields.push(k);
+      features.forEach(f=>{ if(f.get(k)===undefined) f.set(k, fieldDefault(k)); });
+    });
+  }
 
   facilityIdField=idField;
   facilityOriginalFields=originalFields.filter(f=>f!==idField);
@@ -419,6 +446,29 @@ function facilityFile(){
   return name;
 }
 
+// The fields of the files the model reads, so a new file starts with the right
+// ones instead of whatever was typed into a prompt. posts defaults to 2 because
+// that is what Simulation.py assumes when a station has none. Any other file
+// opened with ?facilities= still asks, as it always did.
+const FACILITY_SCHEMAS = {
+  // type is kept in the file, as every stations file has it, but not offered
+  // for editing: nothing in the model reads it, so new stations just get
+  // "facility" and existing ones keep what they have.
+  // charge_slots: chargers at the station, read per station by
+  // battery_charge_profile.py. 8 for a new one, as every scenario had before
+  // it was set per station.
+  "swap_stations.geojson": { idField: "facility_id", fields: ["type", "posts", "charge_slots"],
+                             defaults: { type: "facility", posts: 2, charge_slots: 8 },
+                             numeric: ["posts", "charge_slots"], hidden: ["type"] },
+  "taxi_ranks.geojson":    { idField: "id", fields: ["name", "address"],
+                             defaults: {}, numeric: [], hidden: [] },
+};
+const FACILITY_SCHEMA = FACILITY_SCHEMAS[FACILITY_FILE] || null;
+function fieldDefault(k){
+  const d = FACILITY_SCHEMA && FACILITY_SCHEMA.defaults[k];
+  return d === undefined ? '' : d;
+}
+
 async function fetchJSON(url){
   const res = await fetch(url);
   if(!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
@@ -435,6 +485,16 @@ function setScenarioLabel(text, isError){
 
 document.title = FACILITY_FILE === "taxi_ranks.geojson"
   ? "Taxi Ranks Editor" : "Stations Editor";
+
+// Save to scenario: writes the facilities back over the file this editor was
+// opened on -- swap_stations.geojson or taxi_ranks.geojson. The area shown
+// alongside is context only; it is edited, and saved, in the area tool.
+const saver = ScenarioSave.attach({
+  scenario: SCENARIO_FILE, file: FACILITY_FILE,
+  serialize: facilitiesGeoJSON,
+  container: document.getElementById('controls'),
+  before: document.getElementById('scenarioLabel'),
+});
 
 async function loadFromScenario(){
   let scenario;
@@ -484,18 +544,16 @@ document.getElementById('reloadScenarioBtn').addEventListener('click', ()=>{
   if(facilitySource.getFeatures().length &&
      !confirm("Reload from the scenario folder? Unsaved edits will be lost.")) return;
   facilitySource.clear(); vectorSource.clear();
-  loadFromScenario();
+  loadFromScenario().then(saver.loaded);
 });
 
-loadFromScenario();
+loadFromScenario().then(saver.loaded);
 
-document.getElementById('exportFacilitiesBtn')
-.addEventListener('click', async ()=>{
+// The facilities as they would be written, or null when there are none. Only
+// each feature's own fields go out -- the ___ bookkeeping stays in the page.
+function facilitiesGeoJSON(){
   const features=facilitySource.getFeatures();
-  if(!features.length){
-    alert("No facilities to export.");
-    return;
-  }
+  if(!features.length) return null;
 
   const format=new ol.format.GeoJSON();
 
@@ -513,11 +571,20 @@ document.getElementById('exportFacilitiesBtn')
     return newF;
   });
 
-  const geojson=format.writeFeatures(
+  return format.writeFeatures(
     exportFeatures,
     { featureProjection:'EPSG:3857',
       dataProjection:'EPSG:4326' }
   );
+}
+
+document.getElementById('exportFacilitiesBtn')
+.addEventListener('click', async ()=>{
+  const geojson=facilitiesGeoJSON();
+  if(!geojson){
+    alert("No facilities to export.");
+    return;
+  }
 
   const blob=new Blob([geojson],
     { type:'application/json' });
@@ -556,8 +623,9 @@ const hoverOverlay = new ol.Overlay({
   positioning: 'center-left'
 });
 hoverOverlay.getElement().style.cssText = `
-  background: rgba(255,255,255,0.9);
-  border: 1px solid gray;
+  background: var(--ap-surface-raised);
+  color: var(--ap-ink);
+  border: 1px solid var(--ap-hairline-strong);
   padding: 2px 5px;
   font-size: 12px;
   pointer-events: none;
